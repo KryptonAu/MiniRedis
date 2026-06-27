@@ -1,0 +1,62 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ninja:*)",
+      "Bash(cmake:*)",
+      "Bash(ctest:*)",
+      "Bash(gcc-12:*)",
+      "Bash(g++-12:*)",
+      "Bash(git:*)",
+      "Bash(clang-format:*)",
+      "Bash(mkdir:*)",
+      "Bash(python3:*)",
+      "Bash(chmod:*)",
+      "Bash(ls:*)",
+      "Bash(find:*)",
+      "Bash(cat:*)",
+      "Bash(head:*)",
+      "Bash(grep:*)",
+      "Bash(sed:*)",
+      "Bash(cd:*)"
+    ],
+    "deny": [
+      "Bash(rm -rf:*)",
+      "Bash(sudo:*)"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PROJECT_DIR}/.claude/hooks/clang-format-on-edit.py\""
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PROJECT_DIR}/.claude/hooks/block-protected-dirs.py\""
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "matcher": "permission_prompt",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PROJECT_DIR}/.claude/hooks/notify-permission.py\""
+          }
+        ]
+      }
+    ]
+  }
+}

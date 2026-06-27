@@ -67,3 +67,11 @@ vcpkg_installed/
 # test output & cache
 Testing/
 .cache/
+
+.codegraph/
+
+# Claude Code — track config, ignore runtime artifacts
+.claude/worktrees/
+.claude/plans/
+.claude/cache/
+.claude/*.log
