@@ -39,6 +39,12 @@ public:
   Skiplist();
   ~Skiplist() = default;
 
+  // Move-only
+  Skiplist(const Skiplist&) = delete;
+  Skiplist& operator=(const Skiplist&) = delete;
+  Skiplist(Skiplist&& other) noexcept;
+  Skiplist& operator=(Skiplist&& other) noexcept;
+
   Node* Insert(Score score, Key key);
   bool Delete(Score score, const Key& key);
   bool DeleteNode(Node* node);
@@ -92,6 +98,42 @@ Skiplist<Key, Score, ScoreCompare, KeyCompare>::Skiplist() {
     header_->levels[i].span = 0;
   }
   header_->backward = nullptr;
+}
+
+template <typename Key, typename Score, typename ScoreCompare,
+          typename KeyCompare>
+Skiplist<Key, Score, ScoreCompare, KeyCompare>::Skiplist(
+    Skiplist&& other) noexcept
+    : header_(std::move(other.header_)),
+      nodes_(std::move(other.nodes_)),
+      tail_(other.tail_),
+      size_(other.size_),
+      max_level_(other.max_level_),
+      score_compare_(std::move(other.score_compare_)),
+      key_compare_(std::move(other.key_compare_)) {
+  other.tail_ = nullptr;
+  other.size_ = 0;
+  other.max_level_ = 0;
+}
+
+template <typename Key, typename Score, typename ScoreCompare,
+          typename KeyCompare>
+Skiplist<Key, Score, ScoreCompare, KeyCompare>&
+Skiplist<Key, Score, ScoreCompare, KeyCompare>::operator=(
+    Skiplist&& other) noexcept {
+  if (this != &other) {
+    header_ = std::move(other.header_);
+    nodes_ = std::move(other.nodes_);
+    tail_ = other.tail_;
+    size_ = other.size_;
+    max_level_ = other.max_level_;
+    score_compare_ = std::move(other.score_compare_);
+    key_compare_ = std::move(other.key_compare_);
+    other.tail_ = nullptr;
+    other.size_ = 0;
+    other.max_level_ = 0;
+  }
+  return *this;
 }
 
 template <typename Key, typename Score, typename ScoreCompare, typename KeyCompare>

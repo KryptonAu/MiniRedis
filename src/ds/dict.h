@@ -37,6 +37,12 @@ public:
   Dict();
   ~Dict();
 
+  // Move-only
+  Dict(const Dict&) = delete;
+  Dict& operator=(const Dict&) = delete;
+  Dict(Dict&& other) noexcept;
+  Dict& operator=(Dict&& other) noexcept;
+
   size_t Size() const;
   size_t Buckets() const;
   bool IsRehashing() const;
@@ -176,6 +182,35 @@ Dict<Key, Value, Hash, KeyEqual>::Dict() {
 
 template <typename Key, typename Value, typename Hash, typename KeyEqual>
 Dict<Key, Value, Hash, KeyEqual>::~Dict() = default;
+
+template <typename Key, typename Value, typename Hash, typename KeyEqual>
+Dict<Key, Value, Hash, KeyEqual>::Dict(Dict&& other) noexcept
+    : ht_{std::move(other.ht_[0]), std::move(other.ht_[1])},
+      rehash_idx_(other.rehash_idx_),
+      rehash_step_(other.rehash_step_),
+      safe_iterators_(other.safe_iterators_),
+      hash_(std::move(other.hash_)),
+      key_equal_(std::move(other.key_equal_)) {
+  other.rehash_idx_ = -1;
+  other.safe_iterators_ = 0;
+}
+
+template <typename Key, typename Value, typename Hash, typename KeyEqual>
+Dict<Key, Value, Hash, KeyEqual>& Dict<Key, Value, Hash, KeyEqual>::operator=(
+    Dict&& other) noexcept {
+  if (this != &other) {
+    ht_[0] = std::move(other.ht_[0]);
+    ht_[1] = std::move(other.ht_[1]);
+    rehash_idx_ = other.rehash_idx_;
+    rehash_step_ = other.rehash_step_;
+    safe_iterators_ = other.safe_iterators_;
+    hash_ = std::move(other.hash_);
+    key_equal_ = std::move(other.key_equal_);
+    other.rehash_idx_ = -1;
+    other.safe_iterators_ = 0;
+  }
+  return *this;
+}
 
 template <typename Key, typename Value, typename Hash, typename KeyEqual>
 size_t Dict<Key, Value, Hash, KeyEqual>::Size() const {

@@ -59,10 +59,25 @@ add_library(miniredis_ds STATIC
 target_include_directories(miniredis_ds PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_compile_features(miniredis_ds PUBLIC cxx_std_20)
 
+# ---- Types library ----
+add_library(miniredis_types STATIC
+    src/types/numeric_parse.cpp
+    src/types/string_value.cpp
+    src/types/list_value.cpp
+    src/types/set_value.cpp
+    src/types/hash_value.cpp
+    src/types/zset_value.cpp
+    src/types/value.cpp
+    src/types/type_conversion.cpp
+)
+target_include_directories(miniredis_types PUBLIC ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(miniredis_types PUBLIC miniredis_ds)
+target_compile_features(miniredis_types PUBLIC cxx_std_20)
+
 # ---- Executable ----
 add_executable(miniredis src/main.cpp)
 target_include_directories(miniredis PRIVATE ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(miniredis PRIVATE miniredis_ds stdexec pthread)
+target_link_libraries(miniredis PRIVATE miniredis_types miniredis_ds stdexec pthread)
 target_compile_features(miniredis PRIVATE cxx_std_20)
 
 # ---- Tests ----
