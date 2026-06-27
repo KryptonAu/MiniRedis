@@ -74,10 +74,22 @@ target_include_directories(miniredis_types PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(miniredis_types PUBLIC miniredis_ds)
 target_compile_features(miniredis_types PUBLIC cxx_std_20)
 
+# ---- Core library ----
+add_library(miniredis_core STATIC
+    src/core/resp_protocol.cpp
+    src/core/config.cpp
+    src/core/database.cpp
+    src/core/client.cpp
+    src/core/server.cpp
+)
+target_include_directories(miniredis_core PUBLIC ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(miniredis_core PUBLIC miniredis_types)
+target_compile_features(miniredis_core PUBLIC cxx_std_20)
+
 # ---- Executable ----
 add_executable(miniredis src/main.cpp)
 target_include_directories(miniredis PRIVATE ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(miniredis PRIVATE miniredis_types miniredis_ds stdexec pthread)
+target_link_libraries(miniredis PRIVATE miniredis_core miniredis_types miniredis_ds stdexec pthread)
 target_compile_features(miniredis PRIVATE cxx_std_20)
 
 # ---- Tests ----

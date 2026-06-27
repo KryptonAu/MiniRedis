@@ -23,3 +23,14 @@ add_executable(miniredis_types_test
 target_link_libraries(miniredis_types_test PRIVATE miniredis_types GTest::gtest_main)
 target_compile_features(miniredis_types_test PRIVATE cxx_std_20)
 gtest_discover_tests(miniredis_types_test)
+
+add_executable(miniredis_core_test
+    core/resp_protocol_test.cpp
+    core/config_test.cpp
+    core/database_test.cpp
+    core/client_test.cpp
+    core/server_test.cpp
+)
+target_link_libraries(miniredis_core_test PRIVATE miniredis_core GTest::gtest_main)
+target_compile_features(miniredis_core_test PRIVATE cxx_std_20)
+gtest_discover_tests(miniredis_core_test)
