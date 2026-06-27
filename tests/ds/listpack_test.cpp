@@ -1,0 +1,355 @@
+#include <gtest/gtest.h>
+
+#include "ds/listpack.h"
+
+namespace miniredis::ds {
+namespace {
+
+// ===== Construction =====
+TEST(ListpackTest, ConstructEmpty) {
+  Listpack lp;
+  EXPECT_EQ(lp.Size(), 0);
+  EXPECT_EQ(lp.TotalBytes(), 7);  // 6 header + 1 EOF
+  EXPECT_GT(lp.DataSize(), 0);
+}
+
+// ===== Integer encoding tests =====
+TEST(ListpackTest, AppendSmallUnsignedInteger) {
+  Listpack lp;
+  lp.Append(42);
+  EXPECT_EQ(lp.Size(), 1);
+  EXPECT_TRUE(lp.IsInteger(0));
+  EXPECT_EQ(lp.GetInteger(0).value(), 42);
+}
+
+TEST(ListpackTest, AppendNegativeInteger) {
+  Listpack lp;
+  lp.Append(-100);
+  EXPECT_EQ(lp.Size(), 1);
+  EXPECT_TRUE(lp.IsInteger(0));
+  EXPECT_EQ(lp.GetInteger(0).value(), -100);
+}
+
+TEST(ListpackTest, AppendLargeInteger) {
+  Listpack lp;
+  int64_t val = 1000000;
+  lp.Append(val);
+  EXPECT_EQ(lp.Size(), 1);
+  EXPECT_TRUE(lp.IsInteger(0));
+  EXPECT_EQ(lp.GetInteger(0).value(), val);
+}
+
+TEST(ListpackTest, AppendMinMaxIntegers) {
+  Listpack lp;
+  lp.Append(INT64_MAX);
+  lp.Append(INT64_MIN);
+
+  EXPECT_EQ(lp.Size(), 2);
+  EXPECT_EQ(lp.GetInteger(0).value(), INT64_MAX);
+  EXPECT_EQ(lp.GetInteger(1).value(), INT64_MIN);
+}
+
+// Regression: 32-bit integer encoding must sign-extend correctly
+TEST(ListpackTest, Int32RangeNegative) {
+  Listpack lp;
+  // -100000 is in 32-bit range, triggers LP_ENCODING_32BIT_INT
+  lp.Append(-100000);
+  EXPECT_EQ(lp.Size(), 1);
+  EXPECT_TRUE(lp.IsInteger(0));
+  EXPECT_EQ(lp.GetInteger(0).value(), -100000);
+}
+
+TEST(ListpackTest, Int32RangeBoundaries) {
+  Listpack lp;
+  // -8388609 is the first value that requires 32-bit encoding
+  lp.Append(-8388609);
+  EXPECT_EQ(lp.GetInteger(0).value(), -8388609);
+
+  lp.Append(-2147483648LL);  // INT32_MIN
+  EXPECT_EQ(lp.GetInteger(1).value(), -2147483648LL);
+
+  lp.Append(2147483647);  // INT32_MAX
+  EXPECT_EQ(lp.GetInteger(2).value(), 2147483647);
+}
+
+// ===== String encoding tests =====
+TEST(ListpackTest, AppendShortString) {
+  Listpack lp;
+  lp.Append(std::string_view("hello"));
+  EXPECT_EQ(lp.Size(), 1);
+  EXPECT_TRUE(lp.IsString(0));
+  EXPECT_EQ(lp.GetString(0).value(), "hello");
+}
+
+TEST(ListpackTest, AppendEmptyString) {
+  Listpack lp;
+  lp.Append(std::string_view(""));
+  EXPECT_EQ(lp.Size(), 1);
+  EXPECT_TRUE(lp.IsString(0));
+  EXPECT_EQ(lp.GetString(0).value(), "");
+}
+
+TEST(ListpackTest, AppendLongString) {
+  Listpack lp;
+  std::string long_str(5000, 'x');
+  lp.Append(std::string_view(long_str));
+  EXPECT_EQ(lp.Size(), 1);
+  EXPECT_TRUE(lp.IsString(0));
+  EXPECT_EQ(lp.GetString(0).value(), long_str);
+}
+
+// ===== Mixed types =====
+TEST(ListpackTest, MixedIntegersAndStrings) {
+  Listpack lp;
+  lp.Append(1);
+  lp.Append(std::string_view("two"));
+  lp.Append(3);
+  lp.Append(std::string_view("four"));
+
+  EXPECT_EQ(lp.Size(), 4);
+  EXPECT_EQ(lp.GetInteger(0).value(), 1);
+  EXPECT_EQ(lp.GetString(1).value(), "two");
+  EXPECT_EQ(lp.GetInteger(2).value(), 3);
+  EXPECT_EQ(lp.GetString(3).value(), "four");
+}
+
+// ===== Value struct =====
+TEST(ListpackTest, ValueToStringOnInteger) {
+  Listpack lp;
+  lp.Append(42);
+  auto val = lp.Get(0);
+  ASSERT_TRUE(val.has_value());
+  EXPECT_EQ(val->type, Listpack::Value::Type::kInteger);
+  EXPECT_EQ(val->ToString(), "42");
+}
+
+TEST(ListpackTest, ValueToStringOnString) {
+  Listpack lp;
+  lp.Append(std::string_view("abc"));
+  auto val = lp.Get(0);
+  ASSERT_TRUE(val.has_value());
+  EXPECT_EQ(val->type, Listpack::Value::Type::kString);
+  EXPECT_EQ(val->ToString(), "abc");
+}
+
+// ===== Insert operations =====
+TEST(ListpackTest, InsertAtBeginning) {
+  Listpack lp;
+  lp.Append(2);
+  lp.Append(3);
+  lp.Insert(0, 1);
+
+  EXPECT_EQ(lp.Size(), 3);
+  EXPECT_EQ(lp.GetInteger(0).value(), 1);
+  EXPECT_EQ(lp.GetInteger(1).value(), 2);
+  EXPECT_EQ(lp.GetInteger(2).value(), 3);
+}
+
+TEST(ListpackTest, InsertInMiddle) {
+  Listpack lp;
+  lp.Append(1);
+  lp.Append(3);
+  lp.Insert(1, 2);
+
+  EXPECT_EQ(lp.Size(), 3);
+  EXPECT_EQ(lp.GetInteger(0).value(), 1);
+  EXPECT_EQ(lp.GetInteger(1).value(), 2);
+  EXPECT_EQ(lp.GetInteger(2).value(), 3);
+}
+
+TEST(ListpackTest, InsertAtEnd) {
+  Listpack lp;
+  lp.Append(1);
+  lp.Append(2);
+  lp.Insert(2, 3);
+
+  EXPECT_EQ(lp.Size(), 3);
+  EXPECT_EQ(lp.GetInteger(2).value(), 3);
+}
+
+// ===== Delete operations =====
+TEST(ListpackTest, DeleteFromBeginning) {
+  Listpack lp;
+  lp.Append(1);
+  lp.Append(2);
+  lp.Append(3);
+  lp.Delete(0);
+
+  EXPECT_EQ(lp.Size(), 2);
+  EXPECT_EQ(lp.GetInteger(0).value(), 2);
+}
+
+TEST(ListpackTest, DeleteFromMiddle) {
+  Listpack lp;
+  lp.Append(1);
+  lp.Append(2);
+  lp.Append(3);
+  lp.Delete(1);
+
+  EXPECT_EQ(lp.Size(), 2);
+  EXPECT_EQ(lp.GetInteger(0).value(), 1);
+  EXPECT_EQ(lp.GetInteger(1).value(), 3);
+}
+
+TEST(ListpackTest, DeleteFromEnd) {
+  Listpack lp;
+  lp.Append(1);
+  lp.Append(2);
+  lp.Append(3);
+  lp.Delete(2);
+
+  EXPECT_EQ(lp.Size(), 2);
+  EXPECT_EQ(lp.GetInteger(0).value(), 1);
+  EXPECT_EQ(lp.GetInteger(1).value(), 2);
+}
+
+// ===== Replace operations =====
+TEST(ListpackTest, ReplaceSameType) {
+  Listpack lp;
+  lp.Append(1);
+  lp.Replace(0, 99);
+
+  EXPECT_EQ(lp.Size(), 1);
+  EXPECT_EQ(lp.GetInteger(0).value(), 99);
+}
+
+TEST(ListpackTest, ReplaceStringWithStringSameSize) {
+  Listpack lp;
+  lp.Append(std::string_view("abc"));
+  lp.Replace(0, std::string_view("xyz"));
+
+  EXPECT_EQ(lp.Size(), 1);
+  EXPECT_EQ(lp.GetString(0).value(), "xyz");
+}
+
+// ===== Find operations =====
+TEST(ListpackTest, FindString) {
+  Listpack lp;
+  lp.Append(std::string_view("alpha"));
+  lp.Append(std::string_view("beta"));
+  lp.Append(std::string_view("gamma"));
+
+  auto idx = lp.Find(std::string_view("beta"));
+  ASSERT_TRUE(idx.has_value());
+  EXPECT_EQ(*idx, 1);
+
+  auto missing = lp.Find(std::string_view("delta"));
+  EXPECT_FALSE(missing.has_value());
+}
+
+TEST(ListpackTest, FindInteger) {
+  Listpack lp;
+  lp.Append(10);
+  lp.Append(20);
+  lp.Append(30);
+
+  auto idx = lp.Find(20);
+  ASSERT_TRUE(idx.has_value());
+  EXPECT_EQ(*idx, 1);
+
+  auto missing = lp.Find(99);
+  EXPECT_FALSE(missing.has_value());
+}
+
+// ===== Prepend =====
+TEST(ListpackTest, Prepend) {
+  Listpack lp;
+  lp.Append(2);
+  lp.Prepend(1);
+
+  EXPECT_EQ(lp.Size(), 2);
+  EXPECT_EQ(lp.GetInteger(0).value(), 1);
+}
+
+// ===== Edge cases: integer zero =====
+TEST(ListpackTest, ZeroIsNotString) {
+  Listpack lp;
+  lp.Append(0);
+  EXPECT_FALSE(lp.IsString(0));
+  EXPECT_TRUE(lp.IsInteger(0));
+  EXPECT_EQ(lp.GetInteger(0).value(), 0);
+}
+
+// ===== Edge cases: out of bounds =====
+TEST(ListpackTest, GetOutOfBounds) {
+  Listpack lp;
+  EXPECT_FALSE(lp.Get(0).has_value());
+  lp.Append(1);
+  EXPECT_FALSE(lp.Get(1).has_value());
+}
+
+TEST(ListpackTest, DeleteOutOfBounds) {
+  Listpack lp;
+  EXPECT_FALSE(lp.Delete(0));
+  lp.Append(1);
+  EXPECT_FALSE(lp.Delete(1));
+}
+
+// ===== Serialization round-trip =====
+TEST(ListpackTest, FromBytesValidates) {
+  Listpack lp;
+  lp.Append(1);
+  lp.Append(std::string_view("hello"));
+
+  auto lp2 = Listpack::FromBytes(
+      std::vector<uint8_t>(lp.Data(), lp.Data() + lp.DataSize()));
+  ASSERT_TRUE(lp2.has_value());
+  EXPECT_EQ(lp2->Size(), 2);
+  EXPECT_EQ(lp2->GetInteger(0).value(), 1);
+  EXPECT_EQ(lp2->GetString(1).value(), "hello");
+}
+
+TEST(ListpackTest, FromBytesRejectsInvalid) {
+  // Totally invalid data
+  std::vector<uint8_t> bad = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+  EXPECT_FALSE(Listpack::FromBytes(bad).has_value());
+
+  // Too short
+  std::vector<uint8_t> too_short = {0x07, 0x00, 0x00, 0x00, 0x00, 0x00};
+  EXPECT_FALSE(Listpack::FromBytes(too_short).has_value());
+}
+
+TEST(ListpackTest, FromBytesRejectsWrongNumele) {
+  Listpack lp;
+  lp.Append(1);
+  lp.Append(2);
+  lp.Append(3);
+
+  // Create a copy with corrupted numele
+  std::vector<uint8_t> blob(lp.Data(), lp.Data() + lp.DataSize());
+  // numele is at offset 4-5 (little-endian uint16_t)
+  // Set it to a wrong value: 1 instead of 3
+  blob[4] = 0x01;
+  blob[5] = 0x00;
+
+  EXPECT_FALSE(Listpack::FromBytes(std::move(blob)).has_value());
+}
+
+TEST(ListpackTest, FromBytesAcceptsUint16MaxNumele) {
+  Listpack lp;
+  lp.Append(1);
+  lp.Append(2);
+
+  // Create a copy with UINT16_MAX numele (means "unknown")
+  std::vector<uint8_t> blob(lp.Data(), lp.Data() + lp.DataSize());
+  blob[4] = 0xFF;
+  blob[5] = 0xFF;
+
+  auto result = Listpack::FromBytes(std::move(blob));
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(result->Size(), 2);  // actual count from scanning
+}
+
+// ===== Large data performance =====
+TEST(ListpackTest, LargeNumberOfEntries) {
+  Listpack lp;
+  for (int i = 0; i < 1000; i++) {
+    lp.Append(i);
+  }
+  EXPECT_EQ(lp.Size(), 1000);
+  EXPECT_EQ(lp.GetInteger(0).value(), 0);
+  EXPECT_EQ(lp.GetInteger(999).value(), 999);
+}
+
+}  // namespace
+}  // namespace miniredis::ds

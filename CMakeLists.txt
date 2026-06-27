@@ -50,17 +50,19 @@ add_compile_options(
     -Wno-unknown-warning-option
 )
 
-# ---- Main library (enable when sources exist) ----
-# add_library(miniredis_core STATIC
-#     src/core/...
-# )
-# target_include_directories(miniredis_core PUBLIC ${CMAKE_SOURCE_DIR}/src)
-# target_link_libraries(miniredis_core PUBLIC stdexec pthread)
+# ---- Data Structures library ----
+add_library(miniredis_ds STATIC
+    src/ds/listpack.cpp
+    src/ds/intset.cpp
+    src/ds/quicklist.cpp
+)
+target_include_directories(miniredis_ds PUBLIC ${CMAKE_SOURCE_DIR}/src)
+target_compile_features(miniredis_ds PUBLIC cxx_std_20)
 
 # ---- Executable ----
 add_executable(miniredis src/main.cpp)
 target_include_directories(miniredis PRIVATE ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(miniredis PRIVATE stdexec pthread)
+target_link_libraries(miniredis PRIVATE miniredis_ds stdexec pthread)
 target_compile_features(miniredis PRIVATE cxx_std_20)
 
 # ---- Tests ----
@@ -76,7 +78,7 @@ if(MINIREDIS_BUILD_TESTS)
     set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
     FetchContent_MakeAvailable(googletest)
 
-    # add_subdirectory(tests)
+    add_subdirectory(tests)
 endif()
 
 # ---- clang-format target (Google C++ Style) ----
