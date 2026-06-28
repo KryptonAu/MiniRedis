@@ -103,10 +103,24 @@ target_include_directories(miniredis_commands PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(miniredis_commands PUBLIC miniredis_core)
 target_compile_features(miniredis_commands PUBLIC cxx_std_20)
 
+# ---- IO library ----
+add_library(miniredis_io STATIC
+    src/io/epoll_context.cpp
+    src/io/socket_util.cpp
+)
+target_include_directories(miniredis_io PUBLIC ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(miniredis_io PUBLIC
+    miniredis_commands
+    miniredis_core
+    stdexec
+    pthread
+)
+target_compile_features(miniredis_io PUBLIC cxx_std_20)
+
 # ---- Executable ----
 add_executable(miniredis src/main.cpp)
 target_include_directories(miniredis PRIVATE ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(miniredis PRIVATE miniredis_commands miniredis_core miniredis_types miniredis_ds stdexec pthread)
+target_link_libraries(miniredis PRIVATE miniredis_io stdexec pthread)
 target_compile_features(miniredis PRIVATE cxx_std_20)
 
 # ---- Tests ----

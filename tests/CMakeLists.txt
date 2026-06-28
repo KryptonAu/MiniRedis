@@ -50,3 +50,14 @@ add_executable(miniredis_commands_test
 target_link_libraries(miniredis_commands_test PRIVATE miniredis_commands GTest::gtest_main)
 target_compile_features(miniredis_commands_test PRIVATE cxx_std_20)
 gtest_discover_tests(miniredis_commands_test)
+
+add_executable(miniredis_io_test
+    io/epoll_context_test.cpp
+    io/async_io_test.cpp
+    io/cmd_context_test.cpp
+    io/client_session_test.cpp
+    io/miniredis_tcp_integration_test.cpp
+)
+target_link_libraries(miniredis_io_test PRIVATE miniredis_io GTest::gtest_main)
+target_compile_features(miniredis_io_test PRIVATE cxx_std_20)
+gtest_discover_tests(miniredis_io_test)
