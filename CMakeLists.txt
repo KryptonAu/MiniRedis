@@ -86,10 +86,27 @@ target_include_directories(miniredis_core PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(miniredis_core PUBLIC miniredis_types)
 target_compile_features(miniredis_core PUBLIC cxx_std_20)
 
+# ---- Commands library ----
+add_library(miniredis_commands STATIC
+    src/commands/registry.cpp
+    src/commands/dispatcher.cpp
+    src/commands/command_helpers.cpp
+    src/commands/string_commands.cpp
+    src/commands/list_commands.cpp
+    src/commands/set_commands.cpp
+    src/commands/hash_commands.cpp
+    src/commands/zset_commands.cpp
+    src/commands/key_commands.cpp
+    src/commands/server_commands.cpp
+)
+target_include_directories(miniredis_commands PUBLIC ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(miniredis_commands PUBLIC miniredis_core)
+target_compile_features(miniredis_commands PUBLIC cxx_std_20)
+
 # ---- Executable ----
 add_executable(miniredis src/main.cpp)
 target_include_directories(miniredis PRIVATE ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(miniredis PRIVATE miniredis_core miniredis_types miniredis_ds stdexec pthread)
+target_link_libraries(miniredis PRIVATE miniredis_commands miniredis_core miniredis_types miniredis_ds stdexec pthread)
 target_compile_features(miniredis PRIVATE cxx_std_20)
 
 # ---- Tests ----

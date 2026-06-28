@@ -34,3 +34,19 @@ add_executable(miniredis_core_test
 target_link_libraries(miniredis_core_test PRIVATE miniredis_core GTest::gtest_main)
 target_compile_features(miniredis_core_test PRIVATE cxx_std_20)
 gtest_discover_tests(miniredis_core_test)
+
+add_executable(miniredis_commands_test
+    commands/registry_test.cpp
+    commands/dispatcher_test.cpp
+    commands/command_helpers_test.cpp
+    commands/string_commands_test.cpp
+    commands/list_commands_test.cpp
+    commands/set_commands_test.cpp
+    commands/hash_commands_test.cpp
+    commands/zset_commands_test.cpp
+    commands/key_commands_test.cpp
+    commands/server_commands_test.cpp
+)
+target_link_libraries(miniredis_commands_test PRIVATE miniredis_commands GTest::gtest_main)
+target_compile_features(miniredis_commands_test PRIVATE cxx_std_20)
+gtest_discover_tests(miniredis_commands_test)

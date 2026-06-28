@@ -75,3 +75,7 @@ Testing/
 .claude/plans/
 .claude/cache/
 .claude/*.log
+
+# Agent
+.agents/
+.codex/
