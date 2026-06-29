@@ -2,6 +2,9 @@
 
 #include <gtest/gtest.h>
 
+#include <string>
+#include <vector>
+
 namespace miniredis {
 namespace {
 
@@ -59,6 +62,23 @@ TEST(ListValueTest, RangeNegativeIndex) {
   EXPECT_EQ(r[0], "2");
   EXPECT_EQ(r[1], "3");
   EXPECT_EQ(r[2], "4");
+}
+
+TEST(ListValueTest, RangeAcrossQuicklistNodes) {
+  ListValue lv;
+  std::vector<std::string> values;
+  values.reserve(6);
+  for (int i = 0; i < 6; i++) {
+    values.push_back(std::to_string(i) + std::string(3000, 'x'));
+    lv.PushTail(values.back());
+  }
+
+  auto r = lv.Range(1, 4);
+  ASSERT_EQ(r.size(), 4);
+  EXPECT_EQ(r[0], values[1]);
+  EXPECT_EQ(r[1], values[2]);
+  EXPECT_EQ(r[2], values[3]);
+  EXPECT_EQ(r[3], values[4]);
 }
 
 TEST(ListValueTest, Trim) {

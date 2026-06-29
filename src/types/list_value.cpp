@@ -34,6 +34,29 @@ std::optional<size_t> ListValue::Find(std::string_view value) const {
   return list_.Find(value);
 }
 
+std::vector<std::string> ListValue::Range(long long start, long long stop) {
+  long long sz = static_cast<long long>(Size());
+  if (sz == 0) return {};
+
+  if (start < 0) start = std::max(start + sz, 0LL);
+  if (stop < 0) stop = std::max(stop + sz, 0LL);
+  if (start > stop || start >= sz) return {};
+
+  stop = std::min(stop, sz - 1);
+  size_t range_len = static_cast<size_t>(stop - start + 1);
+  std::vector<std::string> result;
+  result.reserve(range_len);
+
+  // Use iterator for sequential O(K) access
+  auto it = list_.IteratorAt(static_cast<size_t>(start));
+  for (long long i = start; i <= stop; i++) {
+    auto val = it.Value();
+    if (val) result.push_back(val->ToString());
+    it.Next();
+  }
+  return result;
+}
+
 std::vector<std::string> ListValue::Range(long long start,
                                           long long stop) const {
   long long sz = static_cast<long long>(Size());
@@ -91,43 +114,37 @@ bool ListValue::InsertAfter(std::string_view pivot, std::string_view value) {
 }
 
 size_t ListValue::Remove(long long count, std::string_view value) {
-  // count > 0: remove from head; count < 0: remove from tail; count == 0:
-  // remove all
-  size_t removed = 0;
-  if (count >= 0) {
-    long long to_remove = (count == 0) ? static_cast<long long>(Size()) : count;
-    for (long long i = 0; i < to_remove; i++) {
-      auto idx = list_.Find(value);
-      if (!idx) break;
-      list_.Delete(*idx);
-      removed++;
+  // Single pass: collect all matching indices using iterator
+  std::vector<size_t> matches;
+  auto it = list_.Begin();
+  while (it.Index() < list_.Size()) {
+    auto val = it.StringValue();
+    if (val && *val == value) {
+      matches.push_back(it.Index());
     }
-  } else {
-    long long to_remove = -count;
-    // Find from tail
-    for (long long i = 0; i < to_remove; i++) {
-      auto idx = list_.Find(value);
-      if (!idx) break;
-      // Find last occurrence by repeated search from end
-      size_t last_idx = *idx;
-      while (true) {
-        // Search after last found
-        bool found_next = false;
-        for (size_t j = last_idx + 1; j < Size(); j++) {
-          auto v = list_.Get(j);
-          if (v && *v == value) {
-            last_idx = j;
-            found_next = true;
-            break;
-          }
-        }
-        if (!found_next) break;
-      }
-      list_.Delete(last_idx);
-      removed++;
-    }
+    it.Next();
   }
-  return removed;
+
+  if (matches.empty()) return 0;
+
+  size_t to_remove;
+  size_t start_offset;
+  if (count == 0) {
+    to_remove = matches.size();
+    start_offset = 0;
+  } else if (count > 0) {
+    to_remove = std::min(static_cast<size_t>(count), matches.size());
+    start_offset = 0;
+  } else {
+    to_remove = std::min(static_cast<size_t>(-count), matches.size());
+    start_offset = matches.size() - to_remove;
+  }
+
+  // Delete from end to preserve earlier indices
+  for (size_t i = start_offset + to_remove; i > start_offset; i--) {
+    list_.Delete(matches[i - 1]);
+  }
+  return to_remove;
 }
 
 size_t ListValue::Size() const { return list_.Size(); }

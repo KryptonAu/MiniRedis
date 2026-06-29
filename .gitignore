@@ -80,3 +80,7 @@ Testing/
 # Agent
 .agents/
 .codex/
+
+#benchmark
+benchmarks/
+dump.rdb

@@ -1,6 +1,9 @@
+#include "ds/quicklist.h"
+
 #include <gtest/gtest.h>
 
-#include "ds/quicklist.h"
+#include <string>
+#include <vector>
 
 namespace miniredis::ds {
 namespace {
@@ -170,6 +173,22 @@ TEST(QuicklistTest, DeleteRange) {
   EXPECT_EQ(ql.Get(0).value(), "0");
   EXPECT_EQ(ql.Get(1).value(), "1");
   EXPECT_EQ(ql.Get(2).value(), "5");
+}
+
+TEST(QuicklistTest, DeleteRangeAcrossNodesFromMiddle) {
+  Quicklist ql;
+  std::vector<std::string> values;
+  values.reserve(6);
+  for (int i = 0; i < 6; i++) {
+    values.push_back(std::to_string(i) + std::string(3000, 'x'));
+    ql.PushTail(values.back());
+  }
+  ASSERT_GT(ql.NodeCount(), 1);
+
+  EXPECT_TRUE(ql.DeleteRange(1, 4));
+  ASSERT_EQ(ql.Size(), 2);
+  EXPECT_EQ(ql.Get(0).value(), values[0]);
+  EXPECT_EQ(ql.Get(1).value(), values[5]);
 }
 
 // ===== Find =====

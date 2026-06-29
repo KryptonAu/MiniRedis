@@ -15,12 +15,15 @@ SetHashtable IntsetToSetHashtable(const ds::Intset& intset) {
 HashHashtable ListpackToHashDict(const ds::Listpack& lp) {
   HashHashtable ht;
   // Listpack layout: [field1, val1, field2, val2, ...]
-  for (size_t i = 0; i < lp.Size(); i += 2) {
-    auto field = lp.Get(i);
-    auto value = lp.Get(i + 1);
-    if (field && value) {
-      ht.Set(field->ToString(), value->ToString());
-    }
+  auto it = lp.begin();
+  auto end = lp.end();
+  while (it != end) {
+    auto field = *it;
+    ++it;
+    if (it == end) break;
+    auto value = *it;
+    ++it;
+    ht.Set(field.ToString(), value.ToString());
   }
   return ht;
 }
@@ -29,17 +32,20 @@ ZSetSkiplist ListpackToZSetSkiplist(ds::Listpack&& lp) {
   ZSetSkiplist zs;
   // Listpack layout: [ele1, score1_as_str, ele2, score2_as_str, ...]
   // Entries are already in (score, element) order
-  for (size_t i = 0; i < lp.Size(); i += 2) {
-    auto ele = lp.Get(i);
-    auto score_str = lp.Get(i + 1);
-    if (ele && score_str) {
-      auto parsed = ParseFiniteDouble(score_str->ToString());
-      double score = 0.0;
-      if (std::holds_alternative<double>(parsed)) {
-        score = std::get<double>(parsed);
-      }
-      zs.skiplist.Insert(score, ele->ToString());
+  auto it = lp.begin();
+  auto end = lp.end();
+  while (it != end) {
+    auto ele = *it;
+    ++it;
+    if (it == end) break;
+    auto score_str = *it;
+    ++it;
+    auto parsed = ParseFiniteDouble(score_str.ToString());
+    double score = 0.0;
+    if (std::holds_alternative<double>(parsed)) {
+      score = std::get<double>(parsed);
     }
+    zs.skiplist.Insert(score, ele.ToString());
   }
   zs.RebuildDict();
   return zs;

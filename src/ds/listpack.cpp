@@ -155,35 +155,44 @@ int64_t DecodeInteger(const uint8_t* p, size_t* payload_len) {
     *payload_len = 2;
     int64_t v = ((static_cast<int64_t>(first & 0x1F)) << 8) | p[1];
     // 13-bit sign extension
-    if (v & (static_cast<int64_t>(1) << 12)) v -= (static_cast<int64_t>(1) << 13);
+    if (v & (static_cast<int64_t>(1) << 12))
+      v -= (static_cast<int64_t>(1) << 13);
     return v;
   } else if (first == kEnc16BitInt) {
     *payload_len = 3;
     int64_t v = static_cast<int64_t>(p[1]) | (static_cast<int64_t>(p[2]) << 8);
     // 16-bit sign extension
-    if (v & (static_cast<int64_t>(1) << 15)) v -= (static_cast<int64_t>(1) << 16);
+    if (v & (static_cast<int64_t>(1) << 15))
+      v -= (static_cast<int64_t>(1) << 16);
     return v;
   } else if (first == kEnc24BitInt) {
     *payload_len = 4;
     int64_t v = static_cast<int64_t>(p[1]) | (static_cast<int64_t>(p[2]) << 8) |
                 (static_cast<int64_t>(p[3]) << 16);
     // 24-bit sign extension
-    if (v & (static_cast<int64_t>(1) << 23)) v -= (static_cast<int64_t>(1) << 24);
+    if (v & (static_cast<int64_t>(1) << 23))
+      v -= (static_cast<int64_t>(1) << 24);
     return v;
   } else if (first == kEnc32BitInt) {
     *payload_len = 5;
     int64_t v = static_cast<int64_t>(p[1]) | (static_cast<int64_t>(p[2]) << 8) |
-                (static_cast<int64_t>(p[3]) << 16) | (static_cast<int64_t>(p[4]) << 24);
+                (static_cast<int64_t>(p[3]) << 16) |
+                (static_cast<int64_t>(p[4]) << 24);
     // 32-bit sign extension
-    if (v & (static_cast<int64_t>(1) << 31)) v -= (static_cast<int64_t>(1) << 32);
+    if (v & (static_cast<int64_t>(1) << 31))
+      v -= (static_cast<int64_t>(1) << 32);
     return v;
   } else {
     // kEnc64BitInt
     *payload_len = 9;
-    uint64_t uv = static_cast<uint64_t>(p[1]) | (static_cast<uint64_t>(p[2]) << 8) |
-                  (static_cast<uint64_t>(p[3]) << 16) | (static_cast<uint64_t>(p[4]) << 24) |
-                  (static_cast<uint64_t>(p[5]) << 32) | (static_cast<uint64_t>(p[6]) << 40) |
-                  (static_cast<uint64_t>(p[7]) << 48) | (static_cast<uint64_t>(p[8]) << 56);
+    uint64_t uv = static_cast<uint64_t>(p[1]) |
+                  (static_cast<uint64_t>(p[2]) << 8) |
+                  (static_cast<uint64_t>(p[3]) << 16) |
+                  (static_cast<uint64_t>(p[4]) << 24) |
+                  (static_cast<uint64_t>(p[5]) << 32) |
+                  (static_cast<uint64_t>(p[6]) << 40) |
+                  (static_cast<uint64_t>(p[7]) << 48) |
+                  (static_cast<uint64_t>(p[8]) << 56);
     return static_cast<int64_t>(uv);
   }
 }
@@ -241,12 +250,10 @@ uint64_t DecodeBacklen(const uint8_t* p) {
 }
 
 bool IsIntegerEncoding(uint8_t first_byte) {
-  return (first_byte & kEnc7BitUintMask) == 0 ||          // 7-bit uint
+  return (first_byte & kEnc7BitUintMask) == 0 ||             // 7-bit uint
          (first_byte & kEnc13BitIntMask) == kEnc13BitInt ||  // 13-bit int
-         first_byte == kEnc16BitInt ||
-         first_byte == kEnc24BitInt ||
-         first_byte == kEnc32BitInt ||
-         first_byte == kEnc64BitInt;
+         first_byte == kEnc16BitInt || first_byte == kEnc24BitInt ||
+         first_byte == kEnc32BitInt || first_byte == kEnc64BitInt;
 }
 
 }  // namespace
@@ -263,8 +270,8 @@ std::string Listpack::Value::ToString() const {
 Listpack::Listpack() {
   // Initialize with 6-byte header + 1-byte EOF
   buf_.resize(kHdrSize + 1);
-  UpdateHeader();
   buf_[kHdrSize] = kEof;
+  UpdateHeader();
 }
 
 // static
@@ -284,9 +291,12 @@ size_t Listpack::EncodedEntrySize(std::string_view value) {
   }
   size_t len = value.size();
   size_t payload;
-  if (len < 64) payload = 1 + len;
-  else if (len < 4096) payload = 2 + len;
-  else payload = 5 + len;
+  if (len < 64)
+    payload = 1 + len;
+  else if (len < 4096)
+    payload = 2 + len;
+  else
+    payload = 5 + len;
   return payload + EncodeBacklen(nullptr, payload);
 }
 
@@ -310,6 +320,10 @@ size_t Listpack::EncodedEntrySize(int64_t value) {
 }
 
 size_t Listpack::Size() const {
+  if (buf_.size() < kHdrSize + 1) return 0;
+  uint16_t count = LoadLE16(buf_.data() + 4);
+  if (count != UINT16_MAX) return count;
+  // 溢出回退 — quicklist 节点受 fill 限制不会触发
   return EntryCount();
 }
 
@@ -318,13 +332,9 @@ size_t Listpack::TotalBytes() const {
   return LoadLE32(buf_.data());
 }
 
-const uint8_t* Listpack::Data() const {
-  return buf_.data();
-}
+const uint8_t* Listpack::Data() const { return buf_.data(); }
 
-size_t Listpack::DataSize() const {
-  return buf_.size();
-}
+size_t Listpack::DataSize() const { return buf_.size(); }
 
 std::optional<Listpack::Value> Listpack::Get(size_t index) const {
   if (index >= Size()) return std::nullopt;
@@ -356,7 +366,8 @@ std::optional<Listpack::Value> Listpack::Get(size_t index) const {
       str_len = LoadLE32(buf_.data() + pos + 1);
       hdr_len = 5;
     }
-    const char* str_data = reinterpret_cast<const char*>(buf_.data() + pos + hdr_len);
+    const char* str_data =
+        reinterpret_cast<const char*>(buf_.data() + pos + hdr_len);
     return Value{Value::Type::kString, std::string_view(str_data, str_len), 0};
   }
 }
@@ -383,21 +394,13 @@ bool Listpack::IsInteger(size_t index) const {
   return val && val->type == Value::Type::kInteger;
 }
 
-bool Listpack::Append(std::string_view value) {
-  return Insert(Size(), value);
-}
+bool Listpack::Append(std::string_view value) { return Insert(Size(), value); }
 
-bool Listpack::Append(int64_t value) {
-  return Insert(Size(), value);
-}
+bool Listpack::Append(int64_t value) { return Insert(Size(), value); }
 
-bool Listpack::Prepend(std::string_view value) {
-  return Insert(0, value);
-}
+bool Listpack::Prepend(std::string_view value) { return Insert(0, value); }
 
-bool Listpack::Prepend(int64_t value) {
-  return Insert(0, value);
-}
+bool Listpack::Prepend(int64_t value) { return Insert(0, value); }
 
 bool Listpack::Insert(size_t index, std::string_view value) {
   // Check if this string can be encoded as integer
@@ -409,9 +412,12 @@ bool Listpack::Insert(size_t index, std::string_view value) {
   // String encoding: compute payload (encoding header + data)
   size_t len = value.size();
   size_t payload_size;
-  if (len < 64) payload_size = 1 + len;
-  else if (len < 4096) payload_size = 2 + len;
-  else payload_size = 5 + len;
+  if (len < 64)
+    payload_size = 1 + len;
+  else if (len < 4096)
+    payload_size = 2 + len;
+  else
+    payload_size = 5 + len;
 
   size_t pos = SeekInsertPosition(index);
   if (pos > buf_.size()) return false;
@@ -476,7 +482,8 @@ bool Listpack::Delete(size_t index) {
   size_t pos = *pos_opt;
   size_t entry_size = EntrySizeAt(pos);
 
-  buf_.erase(buf_.begin() + static_cast<long>(pos), buf_.begin() + static_cast<long>(pos + entry_size));
+  buf_.erase(buf_.begin() + static_cast<long>(pos),
+             buf_.begin() + static_cast<long>(pos + entry_size));
   UpdateHeader();
   return true;
 }
@@ -530,8 +537,8 @@ std::optional<size_t> Listpack::Find(std::string_view value) const {
         str_len = LoadLE32(buf_.data() + pos + 1);
         hdr_len = 5;
       }
-      if (str_len == value.size() &&
-          std::memcmp(buf_.data() + pos + hdr_len, value.data(), str_len) == 0) {
+      if (str_len == value.size() && std::memcmp(buf_.data() + pos + hdr_len,
+                                                 value.data(), str_len) == 0) {
         return idx;
       }
     }
@@ -638,7 +645,8 @@ void Listpack::UpdateHeader() {
     count++;
     pos += EntrySizeAt(pos);
   }
-  StoreLE16(buf_.data() + 4, count > UINT16_MAX ? UINT16_MAX : static_cast<uint16_t>(count));
+  StoreLE16(buf_.data() + 4,
+            count > UINT16_MAX ? UINT16_MAX : static_cast<uint16_t>(count));
 }
 
 // static
@@ -689,7 +697,8 @@ bool Listpack::ValidateBytes(std::span<const uint8_t> data) {
     if (pos + payload + backlen_size > data.size()) return false;
 
     // Validate backlen
-    uint64_t decoded = DecodeBacklen(data.data() + pos + payload + backlen_size - 1);
+    uint64_t decoded =
+        DecodeBacklen(data.data() + pos + payload + backlen_size - 1);
     if (decoded != payload) return false;
 
     pos += payload + backlen_size;
@@ -701,11 +710,100 @@ bool Listpack::ValidateBytes(std::span<const uint8_t> data) {
 
   // Validate numele matches actual count (or is UINT16_MAX = unknown)
   uint16_t header_numele = LoadLE16(data.data() + 4);
-  if (header_numele != UINT16_MAX && header_numele != static_cast<uint16_t>(actual_count)) {
+  if (header_numele != UINT16_MAX &&
+      header_numele != static_cast<uint16_t>(actual_count)) {
     return false;
   }
 
   return true;
+}
+
+// ===== Iterator =====
+
+Listpack::Iterator::Iterator(const Listpack* lp, size_t pos, size_t index)
+    : lp_(lp), pos_(pos), index_(index) {}
+
+Listpack::Value Listpack::Iterator::operator*() const {
+  const uint8_t* data = lp_->buf_.data();
+  uint8_t first = data[pos_];
+
+  if (IsIntegerEncoding(first)) {
+    size_t payload_len;
+    int64_t val = DecodeInteger(data + pos_, &payload_len);
+    return Value{Value::Type::kInteger, {}, val};
+  } else {
+    // String encoding
+    size_t str_len;
+    size_t hdr_len;
+    if ((first & kEnc6BitStrMask) == kEnc6BitStr) {
+      str_len = first & 0x3F;
+      hdr_len = 1;
+    } else if ((first & kEnc12BitStrMask) == kEnc12BitStr) {
+      str_len = ((static_cast<size_t>(first & 0x0F)) << 8) | data[pos_ + 1];
+      hdr_len = 2;
+    } else {
+      // 32-bit str
+      str_len = LoadLE32(data + pos_ + 1);
+      hdr_len = 5;
+    }
+    const char* str_data = reinterpret_cast<const char*>(data + pos_ + hdr_len);
+    return Value{Value::Type::kString, std::string_view(str_data, str_len), 0};
+  }
+}
+
+bool Listpack::Iterator::Valid() const {
+  return lp_ != nullptr && pos_ < lp_->buf_.size() && lp_->buf_[pos_] != kEof;
+}
+
+Listpack::Iterator& Listpack::Iterator::operator++() {
+  if (!Valid()) return *this;
+  size_t entry_size = lp_->EntrySizeAt(pos_);
+  if (entry_size == 0) {
+    pos_ = lp_->buf_.size();  // past end
+    return *this;
+  }
+  pos_ += entry_size;
+  index_++;
+  return *this;
+}
+
+Listpack::Iterator Listpack::Iterator::operator++(int) {
+  Iterator tmp = *this;
+  ++(*this);
+  return tmp;
+}
+
+Listpack::Iterator& Listpack::Iterator::operator--() {
+  if (pos_ <= kHdrSize) return *this;  // already at first
+  // pos_ - 1 is last byte of previous entry's backlen
+  uint64_t prev_payload = DecodeBacklen(lp_->buf_.data() + pos_ - 1);
+  size_t prev_backlen_size = EncodeBacklen(nullptr, prev_payload);
+  pos_ = pos_ - prev_payload - prev_backlen_size;
+  index_--;
+  return *this;
+}
+
+Listpack::Iterator Listpack::Iterator::operator--(int) {
+  Iterator tmp = *this;
+  --(*this);
+  return tmp;
+}
+
+bool Listpack::Iterator::operator==(const Iterator& other) const {
+  return lp_ == other.lp_ && pos_ == other.pos_;
+}
+
+bool Listpack::Iterator::operator!=(const Iterator& other) const {
+  return !(*this == other);
+}
+
+Listpack::Iterator Listpack::begin() const {
+  return Iterator(this, kHdrSize, 0);
+}
+
+Listpack::Iterator Listpack::end() const {
+  size_t eof_pos = (buf_.size() >= 1) ? buf_.size() - 1 : 0;
+  return Iterator(this, eof_pos, Size());
 }
 
 }  // namespace ds

@@ -12,7 +12,7 @@ namespace miniredis {
 namespace ds {
 
 class Listpack {
-public:
+ public:
   struct Value {
     enum class Type { kString, kInteger };
     Type type;
@@ -52,7 +52,11 @@ public:
   std::optional<size_t> Find(std::string_view value) const;
   std::optional<size_t> Find(int64_t value) const;
 
-private:
+  class Iterator;
+  Iterator begin() const;
+  Iterator end() const;
+
+ private:
   std::vector<uint8_t> buf_;
 
   size_t EntryCount() const;
@@ -63,6 +67,33 @@ private:
   size_t EntrySizeAt(size_t pos) const;
   void UpdateHeader();
   static bool ValidateBytes(std::span<const uint8_t> data);
+};
+
+class Listpack::Iterator {
+ public:
+  using iterator_category = std::forward_iterator_tag;
+  using value_type = Value;
+  using difference_type = std::ptrdiff_t;
+
+  Iterator() = default;
+
+  Value operator*() const;
+  Iterator& operator++();
+  Iterator operator++(int);
+  Iterator& operator--();
+  Iterator operator--(int);
+  bool operator==(const Iterator& other) const;
+  bool operator!=(const Iterator& other) const;
+  size_t Index() const { return index_; }
+  bool Valid() const;
+
+ private:
+  friend class Listpack;
+  Iterator(const Listpack* lp, size_t pos, size_t index);
+
+  const Listpack* lp_ = nullptr;
+  size_t pos_ = 0;
+  size_t index_ = 0;
 };
 
 }  // namespace ds

@@ -18,7 +18,7 @@ struct QuicklistNode {
 };
 
 class Quicklist {
-public:
+ public:
   Quicklist();
 
   size_t Size() const;
@@ -50,8 +50,9 @@ public:
   class Iterator;
   Iterator Begin();
   Iterator End();
+  Iterator IteratorAt(size_t index);
 
-private:
+ private:
   using NodeList = std::list<QuicklistNode>;
   NodeList nodes_;
   size_t count_ = 0;
@@ -61,15 +62,16 @@ private:
   NodeList::iterator NewNodeAfter(NodeList::iterator pos);
   std::pair<NodeList::iterator, size_t> Seek(size_t index);
   std::pair<NodeList::const_iterator, size_t> Seek(size_t index) const;
-  bool NodeAllowInsert(const QuicklistNode& node, size_t encoded_value_size) const;
+  bool NodeAllowInsert(const QuicklistNode& node,
+                       size_t encoded_value_size) const;
   bool NodeAllowMerge(const QuicklistNode& a, const QuicklistNode& b) const;
   void MaybeSplit(NodeList::iterator node);
-  void MaybeMerge(NodeList::iterator node);
+  bool MaybeMerge(NodeList::iterator node);
   size_t FillByteLimit() const;
 };
 
 class Quicklist::Iterator {
-public:
+ public:
   std::optional<Listpack::Value> Value() const;
   std::optional<std::string> StringValue() const;
   std::optional<int64_t> IntValue() const;
@@ -77,14 +79,15 @@ public:
   bool Prev();
   size_t Index() const;
 
-private:
+ private:
   friend class Quicklist;
   NodeList::iterator node_iter_;
-  size_t node_offset_ = 0;
+  Listpack::Iterator lp_iter_;
   size_t global_index_ = 0;
   Quicklist* owner_ = nullptr;
 
-  Iterator(Quicklist* owner, NodeList::iterator node_iter, size_t node_offset, size_t global_index);
+  Iterator(Quicklist* owner, NodeList::iterator node_iter,
+           Listpack::Iterator lp_iter, size_t global_index);
 };
 
 }  // namespace ds

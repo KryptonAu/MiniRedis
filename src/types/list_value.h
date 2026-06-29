@@ -29,6 +29,7 @@ class ListValue {
   bool Set(long long index, std::string_view value);
   std::optional<size_t> Find(std::string_view value) const;
 
+  std::vector<std::string> Range(long long start, long long stop);
   std::vector<std::string> Range(long long start, long long stop) const;
   bool Trim(long long start, long long stop);
 

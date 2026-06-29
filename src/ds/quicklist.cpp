@@ -17,12 +17,18 @@ bool Quicklist::Empty() const { return count_ == 0; }
 // ===== fill factor =====
 size_t Quicklist::FillByteLimit() const {
   switch (fill_) {
-    case -1: return 4096;
-    case -2: return 8192;
-    case -3: return 16384;
-    case -4: return 32768;
-    case -5: return 65536;
-    default: return static_cast<size_t>(fill_) > 0 ? static_cast<size_t>(fill_) : 8192;
+    case -1:
+      return 4096;
+    case -2:
+      return 8192;
+    case -3:
+      return 16384;
+    case -4:
+      return 32768;
+    case -5:
+      return 65536;
+    default:
+      return static_cast<size_t>(fill_) > 0 ? static_cast<size_t>(fill_) : 8192;
   }
 }
 
@@ -37,7 +43,8 @@ Quicklist::NodeList::iterator Quicklist::NewNodeAfter(NodeList::iterator pos) {
   return nodes_.insert(std::next(pos), std::move(node));
 }
 
-bool Quicklist::NodeAllowInsert(const QuicklistNode& node, size_t encoded_value_size) const {
+bool Quicklist::NodeAllowInsert(const QuicklistNode& node,
+                                size_t encoded_value_size) const {
   if (fill_ > 0) {
     // Positive fill: entry count limit
     return node.count < static_cast<size_t>(fill_);
@@ -46,8 +53,10 @@ bool Quicklist::NodeAllowInsert(const QuicklistNode& node, size_t encoded_value_
   return node.lp.TotalBytes() + encoded_value_size <= FillByteLimit();
 }
 
-bool Quicklist::NodeAllowMerge(const QuicklistNode& a, const QuicklistNode& b) const {
-  size_t combined = a.lp.TotalBytes() + b.lp.TotalBytes() - 1;  // subtract 1 EOF overlap
+bool Quicklist::NodeAllowMerge(const QuicklistNode& a,
+                               const QuicklistNode& b) const {
+  size_t combined =
+      a.lp.TotalBytes() + b.lp.TotalBytes() - 1;  // subtract 1 EOF overlap
   return combined <= FillByteLimit() / 2;
 }
 
@@ -78,7 +87,8 @@ std::pair<Quicklist::NodeList::iterator, size_t> Quicklist::Seek(size_t index) {
   }
 }
 
-std::pair<Quicklist::NodeList::const_iterator, size_t> Quicklist::Seek(size_t index) const {
+std::pair<Quicklist::NodeList::const_iterator, size_t> Quicklist::Seek(
+    size_t index) const {
   if (index < count_ / 2) {
     auto it = nodes_.begin();
     size_t offset = index;
@@ -300,10 +310,32 @@ bool Quicklist::Delete(size_t index) {
 
 bool Quicklist::DeleteRange(size_t start, size_t count) {
   if (start >= count_ || count == 0) return false;
-  if (start + count > count_) count = count_ - start;
+  count = std::min(count, count_ - start);
 
-  for (size_t i = 0; i < count; i++) {
-    Delete(start);  // Delete at same position 'count' times
+  auto [it, offset] = Seek(start);
+  size_t remaining = count;
+
+  while (remaining > 0 && it != nodes_.end()) {
+    size_t node_avail = it->count - offset;
+    size_t to_delete = std::min(remaining, node_avail);
+
+    if (to_delete >= it->count) {
+      // Whole node to be deleted
+      it = nodes_.erase(it);  // erase returns next iterator
+      count_ -= to_delete;
+      remaining -= to_delete;
+    } else {
+      // Partial node delete: delete 'to_delete' entries at 'offset'
+      // Delete from the end of the range to avoid re-Seek each time
+      for (size_t i = 0; i < to_delete; i++) {
+        it->lp.Delete(offset);  // offset stays same as elements shift left
+      }
+      it->count -= to_delete;
+      count_ -= to_delete;
+      remaining -= to_delete;
+      ++it;
+      offset = 0;
+    }
   }
   return true;
 }
@@ -349,8 +381,8 @@ void Quicklist::MaybeSplit(NodeList::iterator node) {
   new_node_iter->count = move_count;
 }
 
-void Quicklist::MaybeMerge(NodeList::iterator node) {
-  if (node == nodes_.end()) return;
+bool Quicklist::MaybeMerge(NodeList::iterator node) {
+  if (node == nodes_.end()) return false;
 
   // Try merge with next
   if (auto next = std::next(node); next != nodes_.end()) {
@@ -362,7 +394,7 @@ void Quicklist::MaybeMerge(NodeList::iterator node) {
       }
       node->count += next->count;
       nodes_.erase(next);
-      return;
+      return false;  // node is still valid
     }
   }
   // Try merge with prev
@@ -375,27 +407,43 @@ void Quicklist::MaybeMerge(NodeList::iterator node) {
       }
       prev->count += node->count;
       nodes_.erase(node);
+      return true;  // node was erased
     }
   }
+  return false;
 }
 
 // ===== Iterator =====
+Quicklist::Iterator Quicklist::IteratorAt(size_t index) {
+  if (index >= count_) return End();
+  auto [node_iter, offset] = Seek(index);
+  auto lp_iter = node_iter->lp.begin();
+  for (size_t i = 0; i < offset; i++) {
+    ++lp_iter;
+  }
+  return Iterator(this, node_iter, lp_iter, index);
+}
+
 Quicklist::Iterator Quicklist::Begin() {
-  if (nodes_.empty()) return Iterator(this, nodes_.end(), 0, 0);
-  return Iterator(this, nodes_.begin(), 0, 0);
+  if (nodes_.empty())
+    return Iterator(this, nodes_.end(), Listpack::Iterator(), 0);
+  return Iterator(this, nodes_.begin(), nodes_.begin()->lp.begin(), 0);
 }
 
 Quicklist::Iterator Quicklist::End() {
-  return Iterator(this, nodes_.end(), 0, count_);
+  return Iterator(this, nodes_.end(), Listpack::Iterator(), count_);
 }
 
-Quicklist::Iterator::Iterator(Quicklist* owner, NodeList::iterator node_iter, size_t node_offset,
-                              size_t global_index)
-    : node_iter_(node_iter), node_offset_(node_offset), global_index_(global_index), owner_(owner) {}
+Quicklist::Iterator::Iterator(Quicklist* owner, NodeList::iterator node_iter,
+                              Listpack::Iterator lp_iter, size_t global_index)
+    : node_iter_(node_iter),
+      lp_iter_(lp_iter),
+      global_index_(global_index),
+      owner_(owner) {}
 
 std::optional<Listpack::Value> Quicklist::Iterator::Value() const {
   if (node_iter_ == owner_->nodes_.end()) return std::nullopt;
-  return node_iter_->lp.Get(node_offset_);
+  return *lp_iter_;
 }
 
 std::optional<std::string> Quicklist::Iterator::StringValue() const {
@@ -406,28 +454,33 @@ std::optional<std::string> Quicklist::Iterator::StringValue() const {
 
 std::optional<int64_t> Quicklist::Iterator::IntValue() const {
   if (node_iter_ == owner_->nodes_.end()) return std::nullopt;
-  return node_iter_->lp.GetInteger(node_offset_);
+  auto val = *lp_iter_;
+  if (val.type == Listpack::Value::Type::kInteger) return val.integer;
+  return std::nullopt;
 }
 
 bool Quicklist::Iterator::Next() {
   if (node_iter_ == owner_->nodes_.end()) return false;
-  node_offset_++;
+  ++lp_iter_;
   global_index_++;
-  if (node_offset_ >= node_iter_->count) {
+  // Check if we've exhausted the current listpack
+  if (!lp_iter_.Valid() || lp_iter_ == node_iter_->lp.end()) {
     ++node_iter_;
-    node_offset_ = 0;
+    if (node_iter_ != owner_->nodes_.end()) {
+      lp_iter_ = node_iter_->lp.begin();
+    }
   }
   return node_iter_ != owner_->nodes_.end();
 }
 
 bool Quicklist::Iterator::Prev() {
   if (global_index_ == 0) return false;
-  if (node_offset_ == 0) {
+  if (lp_iter_ == node_iter_->lp.begin()) {
+    // Move to previous node's last entry
     --node_iter_;
-    node_offset_ = node_iter_->count - 1;
-  } else {
-    node_offset_--;
+    lp_iter_ = node_iter_->lp.end();
   }
+  --lp_iter_;
   global_index_--;
   return true;
 }
