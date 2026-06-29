@@ -86,6 +86,27 @@ target_include_directories(miniredis_core PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(miniredis_core PUBLIC miniredis_types)
 target_compile_features(miniredis_core PUBLIC cxx_std_20)
 
+# ---- Persistence library ----
+add_library(miniredis_persistence STATIC
+    src/persistence/crc64.cpp
+    src/persistence/rdb_serialize.cpp
+    src/persistence/rdb_deserialize.cpp
+    src/persistence/aof.cpp
+)
+target_include_directories(miniredis_persistence PUBLIC ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(miniredis_persistence PUBLIC miniredis_core)
+target_compile_features(miniredis_persistence PUBLIC cxx_std_20)
+
+# ---- Eviction library ----
+add_library(miniredis_eviction STATIC
+    src/eviction/expire.cpp
+    src/eviction/evict.cpp
+    src/eviction/server_cron.cpp
+)
+target_include_directories(miniredis_eviction PUBLIC ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(miniredis_eviction PUBLIC miniredis_core)
+target_compile_features(miniredis_eviction PUBLIC cxx_std_20)
+
 # ---- Commands library ----
 add_library(miniredis_commands STATIC
     src/commands/registry.cpp
@@ -100,7 +121,11 @@ add_library(miniredis_commands STATIC
     src/commands/server_commands.cpp
 )
 target_include_directories(miniredis_commands PUBLIC ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(miniredis_commands PUBLIC miniredis_core)
+target_link_libraries(miniredis_commands PUBLIC
+    miniredis_core
+    miniredis_persistence
+    miniredis_eviction
+)
 target_compile_features(miniredis_commands PUBLIC cxx_std_20)
 
 # ---- IO library ----

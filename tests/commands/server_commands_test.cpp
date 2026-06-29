@@ -75,6 +75,22 @@ TEST(ServerCommandsTest, ConfigSetIsRejectedUntilImplemented) {
   EXPECT_TRUE(IsErr(h.Call(reg, {"CONFIG", "SET", "databases", "2"})));
 }
 
+TEST(ServerCommandsTest, ConfigSetAppendOnlyUsesRuntimeHook) {
+  auto reg = CreateDefaultCommandRegistry();
+  CommandTestHarness h;
+  auto ctx = h.Context();
+  bool hook_called = false;
+  ctx.apply_config = [&](std::string_view key, std::string_view value) {
+    hook_called = key == "appendonly" && value == "yes";
+    return h.server.ApplyConfig(key, value);
+  };
+
+  EXPECT_EQ(ExecuteCommand(reg, ctx, {"CONFIG", "SET", "appendonly", "yes"}),
+            "+OK\r\n");
+  EXPECT_TRUE(hook_called);
+  EXPECT_TRUE(h.server.GetConfig().appendonly);
+}
+
 TEST(ServerCommandsTest, InfoIsRegistered) {
   auto reg = CreateDefaultCommandRegistry();
   CommandTestHarness h;

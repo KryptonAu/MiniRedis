@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -10,6 +11,16 @@
 #include "types/value.h"
 
 namespace miniredis {
+
+// Lightweight read-only view of a key and its associated metadata.
+struct KeyView {
+  std::string_view key;
+  const Value& value;
+  std::optional<int64_t> expire_at_ms;
+  uint32_t lru_clock;
+};
+
+using KeyVisitor = std::function<void(const KeyView&)>;
 
 class Database {
  public:
@@ -37,14 +48,36 @@ class Database {
   int64_t TTL(std::string_view key);
   bool IsExpired(std::string_view key) const;
 
+  // Purge all expired keys; returns the number of keys removed.
+  size_t PurgeExpiredKeys(int64_t now_ms);
+
+  // Traversal / sampling (public, for persistence/eviction modules).
+  void ForEachKey(KeyVisitor visitor);
+  std::vector<std::string> SampleKeys(size_t count, bool only_volatile,
+                                      uint64_t seed = 0);
+  std::optional<int64_t> ExpireAt(std::string_view key) const;
+
+  // Restore a value (used by RDB/AOF loading). Preserves move-only Value.
+  void RestoreValue(std::string key, Value value,
+                    std::optional<int64_t> expire_at_ms);
+
+  // Approximate memory usage of this database (keys + values + metadata).
+  size_t ApproxMemoryUsage() const;
+
+  // LRU tracking.
+  void SetCurrentLruClock(uint32_t clock);
+  void Touch(std::string_view key);
+  std::optional<uint32_t> LruOf(std::string_view key) const;
+
   void Clear();
 
  private:
   ds::Dict<std::string, Value> keyspace_;
   ds::Dict<std::string, int64_t> expires_;
+  ds::Dict<std::string, uint32_t> lru_;
+  uint32_t current_lru_clock_ = 0;
 
   bool ExpireIfNeeded(std::string_view key);
-  void PurgeExpiredKeys();
   int64_t NowMs() const;
 };
 

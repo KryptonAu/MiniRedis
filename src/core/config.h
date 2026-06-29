@@ -5,6 +5,8 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <utility>
+#include <vector>
 
 #include "types/encoding_thresholds.h"
 
@@ -25,6 +27,17 @@ struct MiniRedisConfig {
   std::string aof_filename = "appendonly.aof";
   std::string log_level = "notice";
   std::string log_file;
+
+  // Persistence & Eviction (Phase 1+)
+  size_t maxmemory = 0;
+  std::string maxmemory_policy = "noeviction";
+  int maxmemory_samples = 5;
+  int hz = 10;
+  bool appendonly = false;
+  std::string appendfsync = "everysec";
+  std::vector<std::pair<int, int>> save_params = {
+      {3600, 1}, {300, 100}, {60, 10000}};
+  int active_expire_effort = 1;
 };
 
 class ConfigManager {

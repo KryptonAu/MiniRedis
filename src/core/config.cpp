@@ -17,6 +17,15 @@ bool ParseInt(std::string_view s, T& out) {
   return ec == std::errc() && ptr == end;
 }
 
+// Normalize config key: accept either underscore or hyphen form.
+std::string NormalizeKey(std::string_view key) {
+  std::string k(key);
+  for (auto& ch : k) {
+    if (ch == '-') ch = '_';
+  }
+  return k;
+}
+
 }  // namespace
 
 ConfigManager::ConfigManager() = default;
@@ -28,10 +37,8 @@ bool ConfigManager::LoadFromFile(const std::string& path) {
   std::string line;
   bool any_failed = false;
   while (std::getline(file, line)) {
-    // Skip comments and blank lines
     auto pos = line.find('#');
     if (pos != std::string::npos) line = line.substr(0, pos);
-    // Trim
     size_t start = 0;
     while (start < line.size() && std::isspace(line[start])) start++;
     size_t end = line.size();
@@ -39,12 +46,10 @@ bool ConfigManager::LoadFromFile(const std::string& path) {
     if (start >= end) continue;
     line = line.substr(start, end - start);
 
-    // Split key value
     auto space_pos = line.find(' ');
     if (space_pos == std::string::npos) continue;
     std::string key = line.substr(0, space_pos);
     std::string value = line.substr(space_pos + 1);
-    // Trim value
     start = 0;
     while (start < value.size() && std::isspace(value[start])) start++;
     end = value.size();
@@ -57,8 +62,8 @@ bool ConfigManager::LoadFromFile(const std::string& path) {
 }
 
 std::optional<std::string> ConfigManager::Get(std::string_view key) const {
-  // Check known config keys
-  std::string k(key);
+  std::string k = NormalizeKey(key);
+
   if (k == "bind") return config_.bind;
   if (k == "port") return std::to_string(config_.port);
   if (k == "tcp_backlog") return std::to_string(config_.tcp_backlog);
@@ -74,18 +79,31 @@ std::optional<std::string> ConfigManager::Get(std::string_view key) const {
   if (k == "zset_max_listpack_value")
     return std::to_string(config_.zset_max_listpack_value);
   if (k == "save_enabled") return config_.save_enabled ? "yes" : "no";
-  if (k == "rdb_filename") return config_.rdb_filename;
-  if (k == "aof_filename") return config_.aof_filename;
+  if (k == "rdb_filename" || k == "dbfilename") return config_.rdb_filename;
+  if (k == "aof_filename" || k == "appendfilename") return config_.aof_filename;
   if (k == "log_level") return config_.log_level;
   if (k == "log_file") return config_.log_file;
+
+  // Phase 1+ persistence/eviction config
+  if (k == "maxmemory") return std::to_string(config_.maxmemory);
+  if (k == "maxmemory_policy") return config_.maxmemory_policy;
+  if (k == "maxmemory_samples")
+    return std::to_string(config_.maxmemory_samples);
+  if (k == "hz") return std::to_string(config_.hz);
+  if (k == "appendonly") return config_.appendonly ? "yes" : "no";
+  if (k == "appendfsync") return config_.appendfsync;
+  if (k == "active_expire_effort")
+    return std::to_string(config_.active_expire_effort);
+
   auto it = extras_.find(k);
   if (it != extras_.end()) return it->second;
   return std::nullopt;
 }
 
 bool ConfigManager::Set(std::string_view key, std::string_view value) {
-  std::string k(key);
+  std::string k = NormalizeKey(key);
   std::string v(value);
+
   if (k == "bind") {
     config_.bind = v;
     return true;
@@ -147,11 +165,11 @@ bool ConfigManager::Set(std::string_view key, std::string_view value) {
       return false;
     return true;
   }
-  if (k == "rdb_filename") {
+  if (k == "rdb_filename" || k == "dbfilename") {
     config_.rdb_filename = v;
     return true;
   }
-  if (k == "aof_filename") {
+  if (k == "aof_filename" || k == "appendfilename") {
     config_.aof_filename = v;
     return true;
   }
@@ -163,6 +181,58 @@ bool ConfigManager::Set(std::string_view key, std::string_view value) {
     config_.log_file = v;
     return true;
   }
+
+  // Phase 1+ persistence/eviction config
+  if (k == "maxmemory") {
+    size_t val = 0;
+    if (!ParseInt<size_t>(v, val)) return false;
+    config_.maxmemory = val;
+    return true;
+  }
+  if (k == "maxmemory_policy") {
+    if (v != "noeviction" && v != "allkeys_lru" && v != "allkeys-lru" &&
+        v != "volatile_lru" && v != "volatile-lru")
+      return false;
+    // Normalize to underscore form
+    if (v == "allkeys-lru") v = "allkeys_lru";
+    if (v == "volatile-lru") v = "volatile_lru";
+    config_.maxmemory_policy = v;
+    return true;
+  }
+  if (k == "maxmemory_samples") {
+    int val = 0;
+    if (!ParseInt<int>(v, val) || val < 1) return false;
+    config_.maxmemory_samples = val;
+    return true;
+  }
+  if (k == "hz") {
+    int val = 0;
+    if (!ParseInt<int>(v, val) || val < 1 || val > 500) return false;
+    config_.hz = val;
+    return true;
+  }
+  if (k == "appendonly") {
+    if (v == "yes" || v == "true" || v == "1")
+      config_.appendonly = true;
+    else if (v == "no" || v == "false" || v == "0")
+      config_.appendonly = false;
+    else
+      return false;
+    return true;
+  }
+  if (k == "appendfsync") {
+    if (v != "always" && v != "everysec" && v != "no") return false;
+    config_.appendfsync = v;
+    return true;
+  }
+  if (k == "active_expire_effort") {
+    int val = 0;
+    if (!ParseInt<int>(v, val) || val < 1 || val > 10) return false;
+    config_.active_expire_effort = val;
+    return true;
+  }
+
+  // Unknown keys go to extras_ (for forward compatibility)
   extras_[k] = v;
   return true;
 }

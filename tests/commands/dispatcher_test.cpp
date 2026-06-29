@@ -15,6 +15,10 @@ static std::string echo(CommandContext&, const std::vector<std::string>& args) {
   return "$" + std::to_string(args[1].size()) + "\r\n" + args[1] + "\r\n";
 }
 
+static std::string ok_write(CommandContext&, const std::vector<std::string>&) {
+  return "+OK\r\n";
+}
+
 TEST(DispatcherTest, UnknownCommand) {
   auto reg = CreateDefaultCommandRegistry();
   CommandTestHarness h;
@@ -47,6 +51,126 @@ TEST(DispatcherTest, ArityCheckTooFew) {
   auto ctx = h.Context();
   auto r = ExecuteCommand(reg, ctx, {"ECHO"});
   EXPECT_TRUE(r.starts_with("-ERR"));
+}
+
+TEST(DispatcherTest, SuccessfulWriteIncrementsDirtyAndPropagates) {
+  CommandRegistry reg;
+  reg.Register(
+      {"WRITE", 1, static_cast<uint32_t>(CommandFlag::kWrite), ok_write});
+  CommandTestHarness h;
+  auto ctx = h.Context();
+  std::vector<std::string> propagated;
+  int propagated_db = -1;
+  ctx.propagate = [&](int db_index, const std::vector<std::string>& args) {
+    propagated_db = db_index;
+    propagated = args;
+    return true;
+  };
+
+  auto result = ExecuteCommandDetailed(reg, ctx, {"WRITE"});
+
+  EXPECT_TRUE(result.ok);
+  EXPECT_TRUE(result.mutated);
+  EXPECT_EQ(result.propagate_args, std::vector<std::string>({"WRITE"}));
+  EXPECT_EQ(propagated_db, 0);
+  EXPECT_EQ(propagated, std::vector<std::string>({"WRITE"}));
+  EXPECT_EQ(h.server.Stats().dirty, 1u);
+}
+
+TEST(DispatcherTest, PropagationReceivesSelectedDb) {
+  auto reg = CreateDefaultCommandRegistry();
+  CommandTestHarness h;
+  ASSERT_TRUE(h.client.SelectDb(2, h.server.DbCount()));
+  auto ctx = h.Context();
+  int propagated_db = -1;
+  std::vector<std::string> propagated;
+  ctx.propagate = [&](int db_index, const std::vector<std::string>& args) {
+    propagated_db = db_index;
+    propagated = args;
+    return true;
+  };
+
+  auto result = ExecuteCommandDetailed(reg, ctx, {"SET", "key", "value"});
+
+  EXPECT_TRUE(result.ok);
+  EXPECT_TRUE(result.mutated);
+  EXPECT_EQ(propagated_db, 2);
+  EXPECT_EQ(propagated, std::vector<std::string>({"SET", "key", "value"}));
+}
+
+TEST(DispatcherTest, IntegerZeroCanStillBeMutatingWrite) {
+  auto reg = CreateDefaultCommandRegistry();
+  CommandTestHarness h;
+  EXPECT_EQ(h.Call(reg, {"HSET", "hash", "field", "old"}), ":1\r\n");
+  h.server.ResetDirty();
+
+  auto ctx = h.Context();
+  std::vector<std::string> propagated;
+  ctx.propagate = [&](int, const std::vector<std::string>& args) {
+    propagated = args;
+    return true;
+  };
+
+  auto result =
+      ExecuteCommandDetailed(reg, ctx, {"HSET", "hash", "field", "new"});
+
+  EXPECT_EQ(result.reply, ":0\r\n");
+  EXPECT_TRUE(result.ok);
+  EXPECT_TRUE(result.mutated);
+  EXPECT_EQ(propagated,
+            std::vector<std::string>({"HSET", "hash", "field", "new"}));
+  EXPECT_EQ(h.server.Stats().dirty, 1u);
+  EXPECT_EQ(h.Call(reg, {"HGET", "hash", "field"}), "$3\r\nnew\r\n");
+}
+
+TEST(DispatcherTest, NoEvictionRejectsWritesWhenAlreadyOverMaxmemory) {
+  auto reg = CreateDefaultCommandRegistry();
+  CommandTestHarness h;
+  std::string large_value(256, 'x');
+  EXPECT_EQ(h.Call(reg, {"SET", "existing", large_value}), "+OK\r\n");
+  ASSERT_TRUE(h.server.ApplyConfig("maxmemory", "1"));
+  ASSERT_TRUE(h.server.ApplyConfig("maxmemory-policy", "noeviction"));
+  h.server.ResetDirty();
+
+  auto ctx = h.Context();
+  bool propagated = false;
+  ctx.propagate = [&](int, const std::vector<std::string>&) {
+    propagated = true;
+    return true;
+  };
+
+  auto result = ExecuteCommandDetailed(reg, ctx, {"SET", "new", "value"});
+
+  EXPECT_FALSE(result.ok);
+  EXPECT_TRUE(result.reply.starts_with("-OOM"));
+  EXPECT_FALSE(h.server.GetDb(0)->Exists("new"));
+  EXPECT_FALSE(propagated);
+  EXPECT_EQ(h.server.Stats().dirty, 0u);
+
+  propagated = false;
+  result = ExecuteCommandDetailed(reg, ctx, {"DEL", "existing"});
+  EXPECT_TRUE(result.ok);
+  EXPECT_TRUE(result.mutated);
+  EXPECT_EQ(result.reply, ":1\r\n");
+  EXPECT_FALSE(h.server.GetDb(0)->Exists("existing"));
+  EXPECT_TRUE(propagated);
+  EXPECT_EQ(h.server.Stats().dirty, 1u);
+}
+
+TEST(DispatcherTest, ReplayModeDoesNotIncrementDirtyOrPropagate) {
+  CommandRegistry reg;
+  reg.Register(
+      {"WRITE", 1, static_cast<uint32_t>(CommandFlag::kWrite), ok_write});
+  CommandTestHarness h;
+  auto ctx = h.Context();
+
+  auto result = ExecuteCommandDetailed(reg, ctx, {"WRITE"},
+                                       /*replay_mode=*/true);
+
+  EXPECT_TRUE(result.ok);
+  EXPECT_TRUE(result.mutated);
+  EXPECT_TRUE(result.propagate_args.empty());
+  EXPECT_EQ(h.server.Stats().dirty, 0u);
 }
 
 }  // namespace

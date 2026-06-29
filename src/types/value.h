@@ -18,5 +18,6 @@ using Value =
 ValueType GetType(const Value& v);
 ValueEncoding GetEncoding(const Value& v);
 std::string_view TypeName(ValueType type);
+size_t ApproxMemoryUsage(const Value& v);
 
 }  // namespace miniredis

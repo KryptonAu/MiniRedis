@@ -61,3 +61,19 @@ add_executable(miniredis_io_test
 target_link_libraries(miniredis_io_test PRIVATE miniredis_io GTest::gtest_main)
 target_compile_features(miniredis_io_test PRIVATE cxx_std_20)
 gtest_discover_tests(miniredis_io_test)
+
+add_executable(miniredis_persistence_test
+    persistence/crc64_test.cpp
+    persistence/rdb_test.cpp
+    persistence/aof_test.cpp
+)
+target_link_libraries(miniredis_persistence_test PRIVATE miniredis_persistence GTest::gtest_main)
+target_compile_features(miniredis_persistence_test PRIVATE cxx_std_20)
+gtest_discover_tests(miniredis_persistence_test)
+
+add_executable(miniredis_eviction_test
+    eviction/expire_test.cpp
+)
+target_link_libraries(miniredis_eviction_test PRIVATE miniredis_eviction miniredis_core GTest::gtest_main)
+target_compile_features(miniredis_eviction_test PRIVATE cxx_std_20)
+gtest_discover_tests(miniredis_eviction_test)

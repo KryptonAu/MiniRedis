@@ -1,0 +1,146 @@
+#include "eviction/evict.h"
+
+#include <algorithm>
+
+#include "core/database.h"
+#include "core/server.h"
+
+namespace miniredis {
+
+namespace {
+
+constexpr int kEvpoolSize = 16;
+constexpr uint32_t kLruClockMax = 0xFFFFFF;
+
+// Compute idle time from LRU clock values, handling wraparound.
+unsigned long long EstimateIdleTime(uint32_t lru_clock, uint32_t stored_clock) {
+  if (lru_clock >= stored_clock) {
+    return static_cast<unsigned long long>(lru_clock - stored_clock);
+  }
+  return static_cast<unsigned long long>(lru_clock +
+                                         (kLruClockMax - stored_clock));
+}
+
+struct EvictionPoolEntry {
+  unsigned long long idle = 0;
+  std::string key;
+  int dbid = 0;
+};
+
+// Fill the eviction pool with candidate keys sorted by idle time (ascending).
+// The pool has the least-idle entry at position 0 and most-idle at the end.
+void EvictionPoolPopulate(int dbid, Database& db,
+                          const std::vector<std::string>& samples,
+                          uint32_t lru_clock, EvictionPoolEntry* pool) {
+  for (const auto& key : samples) {
+    auto lr = db.LruOf(key);
+    if (!lr.has_value()) continue;
+    auto idle = EstimateIdleTime(lru_clock, *lr);
+
+    // Find insertion position (ascending order by idle).
+    int pos = 0;
+    while (pos < kEvpoolSize && pool[pos].key.empty() == false &&
+           pool[pos].idle < idle) {
+      pos++;
+    }
+
+    if (pos == 0 && !pool[0].key.empty() && pool[0].idle >= idle) {
+      continue;  // Not better than any existing entry.
+    }
+
+    // Shift entries right and insert.
+    int shift = kEvpoolSize - 1;
+    if (pool[shift].key.empty() == false) {
+      shift--;
+    }
+    for (int i = shift; i > pos; i--) {
+      pool[i] = std::move(pool[i - 1]);
+    }
+    pool[pos].idle = idle;
+    pool[pos].key = key;
+    pool[pos].dbid = dbid;
+  }
+}
+
+// Get maxmemory policy as enum from config.
+enum class Policy { kNoEviction, kAllKeysLru, kVolatileLru };
+
+Policy ParsePolicy(const std::string& s) {
+  if (s == "allkeys_lru") return Policy::kAllKeysLru;
+  if (s == "volatile_lru") return Policy::kVolatileLru;
+  return Policy::kNoEviction;
+}
+
+}  // namespace
+
+EvictionResult PerformEvictions(Server& server) {
+  size_t maxmemory = server.GetConfig().maxmemory;
+  if (maxmemory == 0) return EvictionResult::kOk;
+
+  Policy policy = ParsePolicy(server.GetConfig().maxmemory_policy);
+  if (policy == Policy::kNoEviction) return EvictionResult::kOk;
+
+  size_t mem_used = server.ApproxMemoryUsage();
+  if (mem_used <= maxmemory) return EvictionResult::kOk;
+
+  uint32_t lru_clock = server.LruClock();
+  int samples_per_iter = server.GetConfig().maxmemory_samples;
+  int db_count = server.DbCount();
+
+  EvictionPoolEntry pool[kEvpoolSize];
+
+  // Evict until memory is below limit, or we can't evict anymore.
+  for (int attempt = 0; attempt < 256; attempt++) {
+    // Populate eviction pool from each DB.
+    for (int dbid = 0; dbid < db_count; dbid++) {
+      Database* db = server.GetDb(dbid);
+      if (!db || db->Size() == 0) continue;
+
+      bool only_volatile = (policy == Policy::kVolatileLru);
+      if (only_volatile && db->ExpiresSize() == 0) continue;
+
+      auto samples =
+          db->SampleKeys(static_cast<size_t>(samples_per_iter), only_volatile,
+                         static_cast<uint64_t>(attempt * db_count + dbid));
+      EvictionPoolPopulate(dbid, *db, samples, lru_clock, pool);
+    }
+
+    // Find best candidate (rightmost non-empty entry in pool).
+    int best_idx = -1;
+    for (int i = kEvpoolSize - 1; i >= 0; i--) {
+      if (!pool[i].key.empty()) {
+        best_idx = i;
+        break;
+      }
+    }
+
+    if (best_idx < 0) return EvictionResult::kNoMemory;
+
+    // Delete the best candidate.
+    int target_db = pool[best_idx].dbid;
+    std::string key_to_delete = pool[best_idx].key;
+    pool[best_idx].key.clear();
+    pool[best_idx].idle = 0;
+
+    Database* db = server.GetDb(target_db);
+    if (db) {
+      db->Delete(key_to_delete);
+      server.IncrementEvicted(1);
+    }
+
+    mem_used = server.ApproxMemoryUsage();
+    if (mem_used <= maxmemory) return EvictionResult::kOk;
+  }
+
+  return EvictionResult::kNoMemory;
+}
+
+bool ShouldRejectWriteForOom(const Server& server, bool is_write_command) {
+  if (!is_write_command) return false;
+  if (server.GetConfig().maxmemory == 0) return false;
+  if (ParsePolicy(server.GetConfig().maxmemory_policy) != Policy::kNoEviction)
+    return false;
+  return server.ApproxMemoryUsage() > server.GetConfig().maxmemory;
+}
+
+}  // namespace miniredis

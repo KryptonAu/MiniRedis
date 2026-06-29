@@ -31,7 +31,7 @@ struct DictTable {
 
 template <typename Key, typename Value, typename Hash, typename KeyEqual>
 class Dict {
-public:
+ public:
   using Entry = DictEntry<Key, Value>;
 
   Dict();
@@ -55,7 +55,7 @@ public:
   void Clear();
 
   class Iterator {
-  public:
+   public:
     using iterator_category = std::forward_iterator_tag;
     using value_type = Entry;
     using pointer = Entry*;
@@ -76,11 +76,9 @@ public:
     bool operator==(const Iterator& other) const {
       return current_ == other.current_;
     }
-    bool operator!=(const Iterator& other) const {
-      return !(*this == other);
-    }
+    bool operator!=(const Iterator& other) const { return !(*this == other); }
 
-  private:
+   private:
     friend class Dict;
     Dict* dict_ = nullptr;
     int table_index_ = 0;
@@ -92,7 +90,7 @@ public:
   };
 
   class SafeIterator {
-  public:
+   public:
     using iterator_category = std::forward_iterator_tag;
     using value_type = Entry;
     using pointer = Entry*;
@@ -123,13 +121,14 @@ public:
       return !(*this == other);
     }
 
-  private:
+   private:
     friend class Dict;
     Dict* dict_ = nullptr;
     int table_ = 0;
     size_t bucket_ = 0;
     Entry* current_ = nullptr;  // entry to return on deref
-    Entry* next_ = nullptr;     // pre-computed next (safe even if current_ is deleted)
+    Entry* next_ =
+        nullptr;  // pre-computed next (safe even if current_ is deleted)
     int next_table_ = 0;
     size_t next_bucket_ = 0;
 
@@ -148,8 +147,9 @@ public:
   void RehashStep();
 
   std::optional<Key> RandomKey();
+  std::vector<Entry*> GetSomeKeys(size_t count, uint64_t seed);
 
-private:
+ private:
   static constexpr size_t kInitialSize = 4;
   static constexpr int kRehashStepDefault = 1;
 
@@ -279,7 +279,8 @@ int Dict<Key, Value, Hash, KeyEqual>::Rehash(int n) {
 
   while (n-- > 0) {
     // Find a non-empty bucket in ht_[0]
-    while (rehash_idx_ < static_cast<long>(ht_[0].size) && ht_[0].buckets[static_cast<size_t>(rehash_idx_)] == nullptr) {
+    while (rehash_idx_ < static_cast<long>(ht_[0].size) &&
+           ht_[0].buckets[static_cast<size_t>(rehash_idx_)] == nullptr) {
       rehash_idx_++;
     }
 
@@ -492,12 +493,58 @@ std::optional<Key> Dict<Key, Value, Hash, KeyEqual>::RandomKey() {
   return std::nullopt;
 }
 
+template <typename Key, typename Value, typename Hash, typename KeyEqual>
+std::vector<DictEntry<Key, Value>*>
+Dict<Key, Value, Hash, KeyEqual>::GetSomeKeys(size_t count, uint64_t seed) {
+  std::vector<Entry*> samples;
+  if (Size() == 0) return samples;
+  samples.reserve(count);
+
+  auto collect_from_table = [&](DictTable<Key, Value>& table,
+                                size_t start_bucket) {
+    if (table.size == 0 || samples.size() >= count) return;
+    // Use seed-based starting position to avoid always hitting first
+    // non-empty buckets (unlike RandomKey).
+    size_t b = start_bucket % table.size;
+    size_t visited = 0;
+    while (visited < table.size && samples.size() < count) {
+      auto* entry = table.buckets[b].get();
+      while (entry && samples.size() < count) {
+        samples.push_back(entry);
+        entry = entry->next.get();
+      }
+      b = (b + 1) % table.size;
+      visited++;
+    }
+  };
+
+  // Distribute sampling across ht_[0] and ht_[1] proportional to used count.
+  size_t need = count;
+  if (IsRehashing() && ht_[1].used > 0) {
+    size_t ht1_count = std::min(
+        need, static_cast<size_t>((static_cast<uint64_t>(ht_[1].used) * count) /
+                                  Size()));
+    if (ht1_count == 0 && need > 0) ht1_count = 1;  // at least try 1
+    collect_from_table(ht_[1], static_cast<size_t>(seed));
+    if (samples.size() >= count) return samples;
+    need = count - samples.size();
+  }
+
+  collect_from_table(ht_[0], static_cast<size_t>(seed));
+  return samples;
+}
+
 // ===== Iterator Implementation =====
 
 template <typename Key, typename Value, typename Hash, typename KeyEqual>
-Dict<Key, Value, Hash, KeyEqual>::Iterator::Iterator(Dict* dict, int table_index, size_t bucket_index,
+Dict<Key, Value, Hash, KeyEqual>::Iterator::Iterator(Dict* dict,
+                                                     int table_index,
+                                                     size_t bucket_index,
                                                      Entry* current)
-    : dict_(dict), table_index_(table_index), bucket_index_(bucket_index), current_(current) {}
+    : dict_(dict),
+      table_index_(table_index),
+      bucket_index_(bucket_index),
+      current_(current) {}
 
 template <typename Key, typename Value, typename Hash, typename KeyEqual>
 void Dict<Key, Value, Hash, KeyEqual>::Iterator::AdvanceToNext() {
@@ -597,10 +644,12 @@ void Dict<Key, Value, Hash, KeyEqual>::SafeIterator::ComputeNext() {
 }
 
 template <typename Key, typename Value, typename Hash, typename KeyEqual>
-Dict<Key, Value, Hash, KeyEqual>::SafeIterator::SafeIterator() : dict_(nullptr) {}
+Dict<Key, Value, Hash, KeyEqual>::SafeIterator::SafeIterator()
+    : dict_(nullptr) {}
 
 template <typename Key, typename Value, typename Hash, typename KeyEqual>
-Dict<Key, Value, Hash, KeyEqual>::SafeIterator::SafeIterator(Dict* dict) : dict_(dict) {
+Dict<Key, Value, Hash, KeyEqual>::SafeIterator::SafeIterator(Dict* dict)
+    : dict_(dict) {
   Acquire();
   // Find first entry
   table_ = 0;
@@ -632,7 +681,8 @@ Dict<Key, Value, Hash, KeyEqual>::SafeIterator::~SafeIterator() {
 }
 
 template <typename Key, typename Value, typename Hash, typename KeyEqual>
-Dict<Key, Value, Hash, KeyEqual>::SafeIterator::SafeIterator(const SafeIterator& other)
+Dict<Key, Value, Hash, KeyEqual>::SafeIterator::SafeIterator(
+    const SafeIterator& other)
     : dict_(other.dict_),
       table_(other.table_),
       bucket_(other.bucket_),
@@ -645,7 +695,8 @@ Dict<Key, Value, Hash, KeyEqual>::SafeIterator::SafeIterator(const SafeIterator&
 
 template <typename Key, typename Value, typename Hash, typename KeyEqual>
 typename Dict<Key, Value, Hash, KeyEqual>::SafeIterator&
-Dict<Key, Value, Hash, KeyEqual>::SafeIterator::operator=(const SafeIterator& other) {
+Dict<Key, Value, Hash, KeyEqual>::SafeIterator::operator=(
+    const SafeIterator& other) {
   if (this != &other) {
     Release();
     dict_ = other.dict_;
@@ -661,7 +712,8 @@ Dict<Key, Value, Hash, KeyEqual>::SafeIterator::operator=(const SafeIterator& ot
 }
 
 template <typename Key, typename Value, typename Hash, typename KeyEqual>
-Dict<Key, Value, Hash, KeyEqual>::SafeIterator::SafeIterator(SafeIterator&& other) noexcept
+Dict<Key, Value, Hash, KeyEqual>::SafeIterator::SafeIterator(
+    SafeIterator&& other) noexcept
     : dict_(other.dict_),
       table_(other.table_),
       bucket_(other.bucket_),
@@ -674,7 +726,8 @@ Dict<Key, Value, Hash, KeyEqual>::SafeIterator::SafeIterator(SafeIterator&& othe
 
 template <typename Key, typename Value, typename Hash, typename KeyEqual>
 typename Dict<Key, Value, Hash, KeyEqual>::SafeIterator&
-Dict<Key, Value, Hash, KeyEqual>::SafeIterator::operator=(SafeIterator&& other) noexcept {
+Dict<Key, Value, Hash, KeyEqual>::SafeIterator::operator=(
+    SafeIterator&& other) noexcept {
   if (this != &other) {
     Release();
     dict_ = other.dict_;

@@ -57,5 +57,18 @@ TEST(DatabaseTest, SetExpireOnExpiredReturnsFalse) {
   EXPECT_FALSE(db.Exists("key"));
 }
 
+TEST(DatabaseTest, PurgeExpiredKeysUsesCurrentIteratorEntry) {
+  Database db;
+  db.Set("expired", StringValue("old"));
+  db.SetExpire("expired", 100);
+  db.Set("live", StringValue("new"));
+  db.SetExpire("live", 9999999999999LL);
+
+  EXPECT_EQ(db.PurgeExpiredKeys(500), 1u);
+  EXPECT_FALSE(db.Exists("expired"));
+  EXPECT_TRUE(db.Exists("live"));
+  EXPECT_EQ(db.ExpiresSize(), 1u);
+}
+
 }  // namespace
 }  // namespace miniredis

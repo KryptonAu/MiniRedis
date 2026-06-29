@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <functional>
 #include <stdexec/execution.hpp>
 #include <thread>
 #include <unordered_map>
@@ -123,6 +124,11 @@ class EpollContext {
 
   int GetEpollFd() const { return epoll_fd_; }
 
+  // Timer support
+  using TimerCallback = std::function<void(uint64_t expirations)>;
+  bool ArmPeriodicTimer(uint64_t interval_ms, TimerCallback callback);
+  void DisarmTimer() noexcept;
+
  private:
   void ProcessReadyQueue();
   void DrainWakeFd() noexcept;
@@ -132,6 +138,8 @@ class EpollContext {
 
   int epoll_fd_ = -1;
   int wake_fd_ = -1;
+  int timer_fd_ = -1;
+  TimerCallback timer_callback_;
 
   std::atomic<EpollOpBase*> head_{nullptr};
   std::atomic<bool> stopping_{false};

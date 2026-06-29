@@ -2,6 +2,7 @@
 
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
+#include <sys/timerfd.h>
 #include <unistd.h>
 
 #include <cerrno>
@@ -36,9 +37,24 @@ EpollContext::EpollContext() {
     throw std::system_error(errno, std::generic_category(),
                             "epoll_ctl(wake_fd) failed");
   }
+
+  timer_fd_ = ::timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
+  if (timer_fd_ >= 0) {
+    epoll_event tev{};
+    tev.events = EPOLLIN | EPOLLERR;
+    tev.data.fd = timer_fd_;
+    if (::epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, timer_fd_, &tev) < 0) {
+      ::close(timer_fd_);
+      timer_fd_ = -1;
+    }
+  }
 }
 
 EpollContext::~EpollContext() {
+  if (timer_fd_ >= 0) {
+    ::close(timer_fd_);
+    timer_fd_ = -1;
+  }
   if (wake_fd_ >= 0) {
     ::close(wake_fd_);
     wake_fd_ = -1;
@@ -72,6 +88,15 @@ void EpollContext::Run() {
 
       if (fd == wake_fd_) {
         DrainWakeFd();
+        continue;
+      }
+      if (fd == timer_fd_) {
+        uint64_t expirations = 0;
+        while (::read(timer_fd_, &expirations, sizeof(expirations)) > 0) {
+        }
+        if (timer_callback_) {
+          timer_callback_(expirations);
+        }
         continue;
       }
 
@@ -320,7 +345,31 @@ void EpollContext::RecomputeFdMask(EpollIoOpBase* op, bool add) {
   (void)add;  // Reserved for future edge-triggered mode.
 }
 
+bool EpollContext::ArmPeriodicTimer(uint64_t interval_ms,
+                                    TimerCallback callback) {
+  if (timer_fd_ < 0) return false;
+  timer_callback_ = std::move(callback);
+
+  struct itimerspec its {};
+  its.it_interval.tv_sec = static_cast<time_t>(interval_ms / 1000);
+  its.it_interval.tv_nsec = static_cast<long>((interval_ms % 1000) * 1000000);
+  its.it_value = its.it_interval;
+
+  if (::timerfd_settime(timer_fd_, 0, &its, nullptr) < 0) {
+    return false;
+  }
+  return true;
+}
+
+void EpollContext::DisarmTimer() noexcept {
+  if (timer_fd_ < 0) return;
+  timer_callback_ = nullptr;
+  struct itimerspec its {};
+  ::timerfd_settime(timer_fd_, 0, &its, nullptr);
+}
+
 void EpollContext::StopAllIoOps() noexcept {
+  DisarmTimer();
   for (auto& [fd, st] : fd_state_) {
     ::epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, fd, nullptr);
     if (st.read_op != nullptr) {

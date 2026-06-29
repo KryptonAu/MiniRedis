@@ -3,6 +3,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <deque>
+#include <functional>
 #include <mutex>
 #include <stdexec/execution.hpp>
 #include <thread>
@@ -18,7 +19,7 @@ struct CmdOpBase {
   virtual void CompleteStopped() noexcept = 0;
 
  protected:
-  ~CmdOpBase() = default;
+  virtual ~CmdOpBase() = default;
 };
 
 class CmdContext;
@@ -114,6 +115,10 @@ class CmdContext {
   // Returns false if the context is stopping (caller should deliver
   // set_stopped() immediately). Thread-safe.
   bool Enqueue(CmdOpBase* op) noexcept;
+
+  // Post a function to be executed on the CMD thread. Returns false if
+  // stopping. Thread-safe.
+  bool PostFunction(std::function<void()> fn);
 
  private:
   std::mutex mutex_;
@@ -219,6 +224,24 @@ inline bool CmdContext::Enqueue(CmdOpBase* op) noexcept {
     queue_.push_back(op);
   }
   cv_.notify_one();
+  return true;
+}
+
+inline bool CmdContext::PostFunction(std::function<void()> fn) {
+  struct FuncOp : CmdOpBase {
+    std::function<void()> func;
+    explicit FuncOp(std::function<void()> f) : func(std::move(f)) {}
+    void Complete() noexcept override {
+      func();
+      delete this;
+    }
+    void CompleteStopped() noexcept override { delete this; }
+  };
+  auto* op = new FuncOp(std::move(fn));
+  if (!Enqueue(op)) {
+    delete op;
+    return false;
+  }
   return true;
 }
 

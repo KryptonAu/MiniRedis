@@ -4,6 +4,7 @@
 
 #include <exec/async_scope.hpp>
 #include <exec/task.hpp>
+#include <functional>
 #include <stdexec/execution.hpp>
 #include <string>
 #include <utility>
@@ -34,10 +35,11 @@ struct ScopeExit {
 // ---------------------------------------------------------------------------
 // handle_client
 // ---------------------------------------------------------------------------
-inline exec::task<void> handle_client(EpollContext::scheduler io_sched,
-                                      CmdContext::scheduler cmd_sched,
-                                      int client_fd, Server& server,
-                                      CommandRegistry& registry) {
+inline exec::task<void> handle_client(
+    EpollContext::scheduler io_sched, CmdContext::scheduler cmd_sched,
+    int client_fd, Server& server, CommandRegistry& registry,
+    CommandContext::PropagateFn propagate = {},
+    CommandContext::ApplyConfigFn apply_config = {}) {
   Client* client = server.CreateClient(client_fd);
   if (client == nullptr) {
     ::close(client_fd);
@@ -79,6 +81,8 @@ inline exec::task<void> handle_client(EpollContext::scheduler io_sched,
                     return RespReply::Error("ERR invalid DB index");
                   }
                   CommandContext ctx{server, *client, *db};
+                  ctx.propagate = propagate;
+                  ctx.apply_config = apply_config;
                   return ExecuteCommand(registry, ctx, cmd_args);
                 }));
         // Transfer back to the IO thread before touching parser/reply_buf.
@@ -101,18 +105,18 @@ inline exec::task<void> handle_client(EpollContext::scheduler io_sched,
 // ---------------------------------------------------------------------------
 // accept_loop
 // ---------------------------------------------------------------------------
-inline exec::task<void> accept_loop(exec::async_scope& scope,
-                                    EpollContext::scheduler io_sched,
-                                    CmdContext::scheduler cmd_sched,
-                                    Server& server, CommandRegistry& registry,
-                                    int listen_fd) {
+inline exec::task<void> accept_loop(
+    exec::async_scope& scope, EpollContext::scheduler io_sched,
+    CmdContext::scheduler cmd_sched, Server& server, CommandRegistry& registry,
+    int listen_fd, CommandContext::PropagateFn propagate = {},
+    CommandContext::ApplyConfigFn apply_config = {}) {
   while (true) {
     try {
       int client_fd =
           co_await AsyncAcceptSender{io_sched.GetContext(), listen_fd};
       scope.spawn(stdexec::starts_on(
-          io_sched,
-          handle_client(io_sched, cmd_sched, client_fd, server, registry)));
+          io_sched, handle_client(io_sched, cmd_sched, client_fd, server,
+                                  registry, propagate, apply_config)));
     } catch (const std::exception&) {
       co_return;
     }
