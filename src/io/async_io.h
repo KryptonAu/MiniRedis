@@ -213,13 +213,12 @@ inline auto AsyncAcceptSender::connect(Rcvr rcvr) const noexcept
 
 template <class Rcvr>
 inline void AsyncReadSender::OpState<Rcvr>::start() & noexcept {
-  sched_->ArmIo(this);
+  sched_->ScheduleArmIo(this);
 }
 
 template <class Rcvr>
 inline void AsyncReadSender::OpState<Rcvr>::OnReady(uint32_t events) noexcept {
   if (events & (EPOLLERR | EPOLLHUP | EPOLLRDHUP)) {
-    // Try to drain any remaining data before reporting EOF/error.
     std::array<char, 65536> buf{};
     ssize_t n = ::read(this->fd, buf.data(), buf.size());
     if (n > 0) {
@@ -264,7 +263,7 @@ inline void AsyncReadSender::OpState<Rcvr>::OnReady(uint32_t events) noexcept {
     return;
   }
   if (errno == EAGAIN || errno == EWOULDBLOCK) {
-    sched_->ArmIo(this);
+    sched_->ScheduleArmIo(this);
     return;
   }
   stdexec::set_error(std::move(rcvr_),
@@ -281,6 +280,19 @@ inline void AsyncReadSender::OpState<Rcvr>::OnStopped() noexcept {
 
 template <class Rcvr>
 inline void AsyncWriteSender::OpState<Rcvr>::start() & noexcept {
+  if (data_.empty()) {
+    stdexec::set_value(std::move(rcvr_), size_t{0});
+    return;
+  }
+  if (sched_->IsStopping()) {
+    stdexec::set_stopped(std::move(rcvr_));
+    return;
+  }
+  if (!sched_->IsOnThread()) {
+    sched_->ScheduleArmIo(this);
+    return;
+  }
+
   ssize_t n = ::send(this->fd, data_.data() + offset_, data_.size() - offset_,
                      MSG_NOSIGNAL);
   if (n > 0) {
@@ -295,7 +307,7 @@ inline void AsyncWriteSender::OpState<Rcvr>::start() & noexcept {
                            std::system_error(errno, std::generic_category())));
     return;
   }
-  sched_->ArmIo(this);
+  sched_->ScheduleArmIo(this);
 }
 
 template <class Rcvr>
@@ -315,7 +327,7 @@ inline void AsyncWriteSender::OpState<Rcvr>::OnReady(uint32_t events) noexcept {
       continue;
     }
     if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-      sched_->ArmIo(this);
+      sched_->ScheduleArmIo(this);
       return;
     }
     if (n < 0) {
@@ -337,7 +349,7 @@ inline void AsyncWriteSender::OpState<Rcvr>::OnStopped() noexcept {
 
 template <class Rcvr>
 inline void AsyncAcceptSender::OpState<Rcvr>::start() & noexcept {
-  sched_->ArmIo(this);
+  sched_->ScheduleArmIo(this);
 }
 
 template <class Rcvr>
@@ -360,7 +372,7 @@ inline void AsyncAcceptSender::OpState<Rcvr>::OnReady(
   }
 
   if (errno == EAGAIN || errno == EWOULDBLOCK) {
-    sched_->ArmIo(this);
+    sched_->ScheduleArmIo(this);
     return;
   }
 

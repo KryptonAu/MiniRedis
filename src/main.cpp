@@ -104,16 +104,21 @@ int main(int argc, char* argv[]) {
   // 9. Wait for shutdown signal.
   WaitForShutdown();
 
-  // 10. Stop contexts.
+  // 10. Stop accepting (IO context stops accept + pending I/O ops).
   io_ctx.Stop();
+
+  // 11. Wait for all scoped client tasks to complete.
+  //     Use sync_wait to block until scope is empty.
+  stdexec::sync_wait(scope.on_empty());
+
+  // 12. Stop CMD context — no more commands will be processed.
   cmd_ctx.Stop();
 
-  // 11. Join threads.
+  // 13. Join worker threads.
   io_thread.join();
   cmd_thread.join();
 
-  // 12. Clean up.
-  scope.request_stop();
+  // 14. Clean up.
   ::close(listen_fd);
   server.Shutdown();
 

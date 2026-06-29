@@ -114,6 +114,40 @@ bool EpollContext::Enqueue(EpollOpBase* op) noexcept {
 
 // -- I/O management ----------------------------------------------------------
 
+void EpollContext::ScheduleArmIo(EpollIoOpBase* op) {
+  if (IsStopping()) {
+    op->OnStopped();
+    return;
+  }
+
+  if (IsOnThread()) {
+    ArmIo(op);
+    return;
+  }
+
+  // Enqueue a thunk that will call ArmIo() when processed on the IO thread.
+  // The thunk is heap-allocated and self-deleting after execution.
+  struct ArmIoThunk : EpollOpBase {
+    EpollContext* sched;
+    EpollIoOpBase* io_op;
+    explicit ArmIoThunk(EpollContext* s, EpollIoOpBase* op)
+        : EpollOpBase{}, sched(s), io_op(op) {}
+    void Complete() noexcept override {
+      if (sched->IsStopping()) {
+        io_op->OnStopped();
+      } else {
+        sched->ArmIo(io_op);
+      }
+      delete this;
+    }
+  };
+  auto* thunk = new ArmIoThunk(this, op);
+  if (!Enqueue(thunk)) {
+    delete thunk;
+    op->OnStopped();
+  }
+}
+
 void EpollContext::ArmIo(EpollIoOpBase* op) {
   auto& st = fd_state_[op->fd];
   st.fd = op->fd;
@@ -219,6 +253,7 @@ void EpollContext::ProcessIoEvent(int fd, uint32_t events) noexcept {
     auto* op = st.read_op;
     st.read_op = nullptr;
     st.armed_events &= ~EPOLLIN;
+    RecomputeFdMask(op, /*add=*/false);
     op->OnReady(events);
     return;
   }
@@ -228,6 +263,7 @@ void EpollContext::ProcessIoEvent(int fd, uint32_t events) noexcept {
     auto* op = st.write_op;
     st.write_op = nullptr;
     st.armed_events &= ~EPOLLOUT;
+    RecomputeFdMask(op, /*add=*/false);
     op->OnReady(events);
     return;
   }
@@ -237,16 +273,51 @@ void EpollContext::ProcessIoEvent(int fd, uint32_t events) noexcept {
     if (st.read_op != nullptr) {
       auto* op = st.read_op;
       st.read_op = nullptr;
+      st.armed_events = 0;
+      RecomputeFdMask(op, /*add=*/false);
       op->OnReady(events);
       return;
     }
     if (st.write_op != nullptr) {
       auto* op = st.write_op;
       st.write_op = nullptr;
+      st.armed_events = 0;
+      RecomputeFdMask(op, /*add=*/false);
       op->OnReady(events);
       return;
     }
   }
+}
+
+void EpollContext::RecomputeFdMask(EpollIoOpBase* op, bool add) {
+  // Recompute the epoll mask from FdState and update the kernel.
+  int fd = op->fd;
+  auto it = fd_state_.find(fd);
+  if (it == fd_state_.end()) return;
+
+  auto& st = it->second;
+
+  uint32_t new_mask = EPOLLERR | EPOLLHUP | EPOLLRDHUP;
+  if (st.read_op != nullptr) new_mask |= EPOLLIN;
+  if (st.write_op != nullptr) new_mask |= EPOLLOUT;
+  if (st.accept_op != nullptr) new_mask |= EPOLLIN;
+
+  if (new_mask == (EPOLLERR | EPOLLHUP | EPOLLRDHUP)) {
+    // No more ops on this fd — remove from epoll.
+    st.armed_events = 0;
+    ::epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, fd, nullptr);
+    fd_state_.erase(it);
+  } else {
+    // Update the interest mask.
+    int op_code = (st.armed_events != 0) ? EPOLL_CTL_MOD : EPOLL_CTL_ADD;
+    epoll_event ev{};
+    ev.events = new_mask;
+    ev.data.fd = fd;
+    ::epoll_ctl(epoll_fd_, op_code, fd, &ev);
+    st.armed_events = new_mask;
+  }
+
+  (void)add;  // Reserved for future edge-triggered mode.
 }
 
 void EpollContext::StopAllIoOps() noexcept {

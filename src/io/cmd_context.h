@@ -15,6 +15,7 @@ namespace miniredis {
 struct CmdOpBase {
   CmdOpBase* next_ = nullptr;
   virtual void Complete() noexcept = 0;
+  virtual void CompleteStopped() noexcept = 0;
 
  protected:
   ~CmdOpBase() = default;
@@ -60,6 +61,9 @@ struct CmdScheduleOpState final : CmdOpBase {
   void start() & noexcept;
 
   void Complete() noexcept override { stdexec::set_value(std::move(rcvr_)); }
+  void CompleteStopped() noexcept override {
+    stdexec::set_stopped(std::move(rcvr_));
+  }
 };
 
 template <class Rcvr>
@@ -179,15 +183,14 @@ inline void CmdContext::Run() {
     }
   }
 
-  // Drain remaining queued operations — complete them with set_value.
-  // (They were enqueued before Stop() was visible.)
+  // Drain remaining queued operations — complete them with set_stopped.
   {
     std::unique_lock<std::mutex> lock(mutex_);
     while (!queue_.empty()) {
       auto* op = queue_.front();
       queue_.pop_front();
       lock.unlock();
-      op->Complete();
+      op->CompleteStopped();
       lock.lock();
     }
   }

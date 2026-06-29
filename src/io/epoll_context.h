@@ -16,7 +16,7 @@ struct EpollOpBase {
   virtual void Complete() noexcept = 0;
 
  protected:
-  ~EpollOpBase() = default;
+  virtual ~EpollOpBase() = default;
 };
 
 // Forward-declared — defined in async_io.h.
@@ -108,11 +108,17 @@ class EpollContext {
   void Run();
   void Stop() noexcept;
   bool IsOnThread() const noexcept;
+  bool IsStopping() const noexcept {
+    return stopping_.load(std::memory_order_acquire);
+  }
 
   bool Enqueue(EpollOpBase* op) noexcept;
 
   // -- I/O operation registration (must be called from IO thread) ----------
+  // ArmIo() assumes the caller is on the IO thread; ScheduleArmIo()
+  // is safe from any thread.
   void ArmIo(EpollIoOpBase* op);
+  void ScheduleArmIo(EpollIoOpBase* op);
   void CancelFd(int fd) noexcept;
 
   int GetEpollFd() const { return epoll_fd_; }

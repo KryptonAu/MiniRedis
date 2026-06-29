@@ -119,6 +119,9 @@ struct TestServer {
   std::thread io_thread;
   std::thread cmd_thread;
   std::unique_ptr<CommandRegistry> registry;
+  bool stopped = false;
+
+  ~TestServer() { Stop(); }
 
   bool Start() {
     Server& server = Server::Instance();
@@ -146,7 +149,7 @@ struct TestServer {
 
     cmd_thread = std::thread([&] { cmd_ctx.Run(); });
 
-    io_thread = std::thread([&, io_sched, cmd_sched, &server] {
+    io_thread = std::thread([&, io_sched, cmd_sched] {
       scope.spawn(stdexec::starts_on(
           io_sched, accept_loop(scope, io_sched, cmd_sched, server, *registry,
                                 listen_fd)));
@@ -159,12 +162,18 @@ struct TestServer {
   }
 
   void Stop() {
+    if (stopped) return;
+    stopped = true;
     io_ctx.Stop();
+    stdexec::sync_wait(scope.on_empty());
     cmd_ctx.Stop();
-    io_thread.join();
-    cmd_thread.join();
-    scope.request_stop();
-    if (listen_fd >= 0) ::close(listen_fd);
+    if (io_thread.joinable()) io_thread.join();
+    if (cmd_thread.joinable()) cmd_thread.join();
+    if (listen_fd >= 0) {
+      ::close(listen_fd);
+      listen_fd = -1;
+    }
+    Server::Instance().Shutdown();
   }
 };
 
