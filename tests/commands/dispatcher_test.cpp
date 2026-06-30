@@ -11,13 +11,14 @@
 namespace miniredis {
 namespace {
 
-static std::string echo(CommandContext&, const std::vector<std::string>& args) {
-  return "$" + std::to_string(args[1].size()) + "\r\n" + args[1] + "\r\n";
+static std::string echo(CommandContext&, CommandArgs args) {
+  std::string reply = "$" + std::to_string(args[1].size()) + "\r\n";
+  reply.append(args[1]);
+  reply += "\r\n";
+  return reply;
 }
 
-static std::string ok_write(CommandContext&, const std::vector<std::string>&) {
-  return "+OK\r\n";
-}
+static std::string ok_write(CommandContext&, CommandArgs) { return "+OK\r\n"; }
 
 TEST(DispatcherTest, UnknownCommand) {
   auto reg = CreateDefaultCommandRegistry();

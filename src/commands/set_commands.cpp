@@ -9,17 +9,17 @@ namespace miniredis {
 
 using Flag = CommandFlag;
 
-static SetValue* GetSet(CommandContext& ctx, const std::string& key) {
+static SetValue* GetSet(CommandContext& ctx, std::string_view key) {
   auto* v = ctx.db.Find(key);
   return v ? std::get_if<SetValue>(v) : nullptr;
 }
 
-static bool IsSetWrongType(CommandContext& ctx, const std::string& key) {
+static bool IsSetWrongType(CommandContext& ctx, std::string_view key) {
   auto* val = ctx.db.Find(key);
   return val && !std::holds_alternative<SetValue>(*val);
 }
 
-static SetValue& GetOrCreateSet(CommandContext& ctx, const std::string& key) {
+static SetValue& GetOrCreateSet(CommandContext& ctx, std::string_view key) {
   auto* v = ctx.db.Find(key);
   if (!v) {
     ctx.db.Set(key, MakeSetValue(ctx));
@@ -28,8 +28,7 @@ static SetValue& GetOrCreateSet(CommandContext& ctx, const std::string& key) {
   return std::get<SetValue>(*v);
 }
 
-static std::string SAddCmd(CommandContext& ctx,
-                           const std::vector<std::string>& args) {
+static std::string SAddCmd(CommandContext& ctx, CommandArgs args) {
   auto* val = ctx.db.Find(args[1]);
   if (val && !std::holds_alternative<SetValue>(*val))
     return RespReply::WrongType();
@@ -39,8 +38,7 @@ static std::string SAddCmd(CommandContext& ctx,
     if (sv.Add(args[i])) added++;
   return RespReply::Integer(added);
 }
-static std::string SRemCmd(CommandContext& ctx,
-                           const std::vector<std::string>& args) {
+static std::string SRemCmd(CommandContext& ctx, CommandArgs args) {
   auto* val_sr = ctx.db.Find(args[1]);
   if (val_sr && !std::holds_alternative<SetValue>(*val_sr))
     return RespReply::WrongType();
@@ -52,29 +50,25 @@ static std::string SRemCmd(CommandContext& ctx,
   if (sv->Size() == 0) ctx.db.Delete(args[1]);
   return RespReply::Integer(removed);
 }
-static std::string SMembersCmd(CommandContext& ctx,
-                               const std::vector<std::string>& args) {
+static std::string SMembersCmd(CommandContext& ctx, CommandArgs args) {
   if (IsSetWrongType(ctx, args[1])) return RespReply::WrongType();
   auto* sv = GetSet(ctx, args[1]);
   if (!sv) return RespReply::EmptyArray();
   return RespReply::ArrayOfBulkStrings(sv->Members());
 }
-static std::string SCardCmd(CommandContext& ctx,
-                            const std::vector<std::string>& args) {
+static std::string SCardCmd(CommandContext& ctx, CommandArgs args) {
   auto* val = ctx.db.Find(args[1]);
   if (val && !std::holds_alternative<SetValue>(*val))
     return RespReply::WrongType();
   auto* sv = GetSet(ctx, args[1]);
   return RespReply::Integer(sv ? static_cast<int64_t>(sv->Size()) : 0);
 }
-static std::string SIsMemberCmd(CommandContext& ctx,
-                                const std::vector<std::string>& args) {
+static std::string SIsMemberCmd(CommandContext& ctx, CommandArgs args) {
   if (IsSetWrongType(ctx, args[1])) return RespReply::WrongType();
   auto* sv = GetSet(ctx, args[1]);
   return RespReply::Integer(sv && sv->Contains(args[2]) ? 1 : 0);
 }
-static std::string SPopCmd(CommandContext& ctx,
-                           const std::vector<std::string>& args) {
+static std::string SPopCmd(CommandContext& ctx, CommandArgs args) {
   if (args.size() > 2) return Unsupported("SPOP count");
   if (IsSetWrongType(ctx, args[1])) return RespReply::WrongType();
   auto* sv = GetSet(ctx, args[1]);
@@ -84,8 +78,7 @@ static std::string SPopCmd(CommandContext& ctx,
   if (sv->Size() == 0) ctx.db.Delete(args[1]);
   return RespReply::BulkString(*m);
 }
-static std::string SRandMemberCmd(CommandContext& ctx,
-                                  const std::vector<std::string>& args) {
+static std::string SRandMemberCmd(CommandContext& ctx, CommandArgs args) {
   if (args.size() > 2) return Unsupported("SRANDMEMBER count");
   if (IsSetWrongType(ctx, args[1])) return RespReply::WrongType();
   auto* sv = GetSet(ctx, args[1]);

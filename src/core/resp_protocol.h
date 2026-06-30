@@ -2,7 +2,9 @@
 
 #include <cstddef>
 #include <deque>
+#include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -15,6 +17,31 @@ enum class ParseStatus {
   kError,
 };
 
+class RespCommand {
+ public:
+  RespCommand();
+
+  std::span<const std::string_view> Args() const;
+  size_t size() const;
+  bool empty() const;
+  std::string_view operator[](size_t index) const;
+  std::vector<std::string> ToOwnedVector() const;
+
+ private:
+  friend class RespParser;
+
+  struct ArgSpan {
+    size_t offset = 0;
+    size_t length = 0;
+  };
+
+  RespCommand(std::shared_ptr<const std::string> storage,
+              std::vector<ArgSpan> spans);
+
+  std::shared_ptr<const std::string> storage_;
+  std::vector<std::string_view> args_;
+};
+
 class RespParser {
  public:
   RespParser();
@@ -23,18 +50,24 @@ class RespParser {
 
   bool HasCommand() const;
   size_t PendingCommandCount() const;
-  std::vector<std::string> TakeCommand();
+  RespCommand TakeCommand();
 
   void Reset();
   std::optional<std::string_view> LastError() const;
   size_t BufferSize() const;
 
  private:
-  std::vector<uint8_t> buffer_;
-  std::deque<std::vector<std::string>> ready_commands_;
+  struct ParsedCommand {
+    std::vector<RespCommand::ArgSpan> args;
+  };
+
+  std::string buffer_;
+  std::deque<RespCommand> ready_commands_;
   std::string error_;
 
-  ParseStatus ParseOneAt(size_t& pos);
+  ParseStatus ParseOneAt(size_t& pos, ParsedCommand& command);
+  void CommitParsedCommands(std::vector<ParsedCommand> commands,
+                            size_t consumed);
 };
 
 class RespReply {

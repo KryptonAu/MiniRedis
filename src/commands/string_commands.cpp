@@ -29,8 +29,7 @@ static bool CheckedExpireAtFromNow(int64_t duration_ms, int64_t& expire_at) {
   return true;
 }
 
-static std::string GetCmd(CommandContext& ctx,
-                          const std::vector<std::string>& args) {
+static std::string GetCmd(CommandContext& ctx, CommandArgs args) {
   auto* val = ctx.db.Find(args[1]);
   if (!val) return RespReply::Nil();
   auto* sv = std::get_if<StringValue>(val);
@@ -38,21 +37,18 @@ static std::string GetCmd(CommandContext& ctx,
   return RespReply::BulkString(sv->ToString());
 }
 
-static std::string SetCmd(CommandContext& ctx,
-                          const std::vector<std::string>& args) {
+static std::string SetCmd(CommandContext& ctx, CommandArgs args) {
   ctx.db.Set(args[1], StringValue(args[2]));
   return RespReply::Ok();
 }
 
-static std::string SetNXCmd(CommandContext& ctx,
-                            const std::vector<std::string>& args) {
+static std::string SetNXCmd(CommandContext& ctx, CommandArgs args) {
   if (ctx.db.Exists(args[1])) return RespReply::Nil();
   ctx.db.Set(args[1], StringValue(args[2]));
   return RespReply::Integer(1);
 }
 
-static std::string SetExCmd(CommandContext& ctx,
-                            const std::vector<std::string>& args) {
+static std::string SetExCmd(CommandContext& ctx, CommandArgs args) {
   auto parsed = ParseCanonicalInt(args[2]);
   if (!std::holds_alternative<ParsedInt>(parsed)) return InvalidInteger();
   int64_t sec = std::get<ParsedInt>(parsed).value;
@@ -67,8 +63,7 @@ static std::string SetExCmd(CommandContext& ctx,
   return RespReply::Ok();
 }
 
-static std::string PSetExCmd(CommandContext& ctx,
-                             const std::vector<std::string>& args) {
+static std::string PSetExCmd(CommandContext& ctx, CommandArgs args) {
   auto parsed = ParseCanonicalInt(args[2]);
   if (!std::holds_alternative<ParsedInt>(parsed)) return InvalidInteger();
   int64_t ms = std::get<ParsedInt>(parsed).value;
@@ -80,8 +75,7 @@ static std::string PSetExCmd(CommandContext& ctx,
   return RespReply::Ok();
 }
 
-static std::string GetSetCmd(CommandContext& ctx,
-                             const std::vector<std::string>& args) {
+static std::string GetSetCmd(CommandContext& ctx, CommandArgs args) {
   auto* val = ctx.db.Find(args[1]);
   std::string old;
   if (val) {
@@ -94,8 +88,7 @@ static std::string GetSetCmd(CommandContext& ctx,
   return RespReply::Nil();
 }
 
-static std::string GetDelCmd(CommandContext& ctx,
-                             const std::vector<std::string>& args) {
+static std::string GetDelCmd(CommandContext& ctx, CommandArgs args) {
   auto* val = ctx.db.Find(args[1]);
   if (!val) return RespReply::Nil();
   auto* sv = std::get_if<StringValue>(val);
@@ -105,8 +98,7 @@ static std::string GetDelCmd(CommandContext& ctx,
   return RespReply::BulkString(old);
 }
 
-static std::string GetExCmd(CommandContext& ctx,
-                            const std::vector<std::string>& args) {
+static std::string GetExCmd(CommandContext& ctx, CommandArgs args) {
   auto* val = ctx.db.Find(args[1]);
   if (!val) return RespReply::Nil();
   auto* sv = std::get_if<StringValue>(val);
@@ -114,8 +106,7 @@ static std::string GetExCmd(CommandContext& ctx,
   return RespReply::BulkString(sv->ToString());
 }
 
-static std::string AppendCmd(CommandContext& ctx,
-                             const std::vector<std::string>& args) {
+static std::string AppendCmd(CommandContext& ctx, CommandArgs args) {
   auto* val = ctx.db.Find(args[1]);
   if (!val) {
     ctx.db.Set(args[1], StringValue(args[2]));
@@ -127,8 +118,7 @@ static std::string AppendCmd(CommandContext& ctx,
   return RespReply::Integer(static_cast<int64_t>(sv->Length()));
 }
 
-static std::string StrlenCmd(CommandContext& ctx,
-                             const std::vector<std::string>& args) {
+static std::string StrlenCmd(CommandContext& ctx, CommandArgs args) {
   auto* val = ctx.db.Find(args[1]);
   if (!val) return RespReply::Integer(0);
   auto* sv = std::get_if<StringValue>(val);
@@ -136,8 +126,7 @@ static std::string StrlenCmd(CommandContext& ctx,
   return RespReply::Integer(static_cast<int64_t>(sv->Length()));
 }
 
-static std::string GetRangeCmd(CommandContext& ctx,
-                               const std::vector<std::string>& args) {
+static std::string GetRangeCmd(CommandContext& ctx, CommandArgs args) {
   auto* val = ctx.db.Find(args[1]);
   if (!val) return RespReply::BulkString("");
   auto* sv = std::get_if<StringValue>(val);
@@ -151,8 +140,7 @@ static std::string GetRangeCmd(CommandContext& ctx,
                                             std::get<ParsedInt>(p2).value));
 }
 
-static std::string SetRangeCmd(CommandContext& ctx,
-                               const std::vector<std::string>& args) {
+static std::string SetRangeCmd(CommandContext& ctx, CommandArgs args) {
   auto parsed = ParseCanonicalInt(args[2]);
   if (!std::holds_alternative<ParsedInt>(parsed)) return InvalidInteger();
   int64_t offset = std::get<ParsedInt>(parsed).value;
@@ -172,8 +160,7 @@ static std::string SetRangeCmd(CommandContext& ctx,
   return RespReply::Integer(static_cast<int64_t>(sv->Length()));
 }
 
-static std::string IncrCmd(CommandContext& ctx,
-                           const std::vector<std::string>& args) {
+static std::string IncrCmd(CommandContext& ctx, CommandArgs args) {
   auto* val = ctx.db.Find(args[1]);
   if (!val) {
     ctx.db.Set(args[1], StringValue(0));
@@ -187,8 +174,7 @@ static std::string IncrCmd(CommandContext& ctx,
   return RespReply::Integer(std::get<int64_t>(result));
 }
 
-static std::string DecrCmd(CommandContext& ctx,
-                           const std::vector<std::string>& args) {
+static std::string DecrCmd(CommandContext& ctx, CommandArgs args) {
   auto* val = ctx.db.Find(args[1]);
   if (!val) {
     ctx.db.Set(args[1], StringValue(0));
@@ -202,8 +188,7 @@ static std::string DecrCmd(CommandContext& ctx,
   return RespReply::Integer(std::get<int64_t>(result));
 }
 
-static std::string IncrByCmd(CommandContext& ctx,
-                             const std::vector<std::string>& args) {
+static std::string IncrByCmd(CommandContext& ctx, CommandArgs args) {
   auto parsed = ParseCanonicalInt(args[2]);
   if (!std::holds_alternative<ParsedInt>(parsed)) return InvalidInteger();
   int64_t delta = std::get<ParsedInt>(parsed).value;
@@ -220,8 +205,7 @@ static std::string IncrByCmd(CommandContext& ctx,
   return RespReply::Integer(std::get<int64_t>(result));
 }
 
-static std::string DecrByCmd(CommandContext& ctx,
-                             const std::vector<std::string>& args) {
+static std::string DecrByCmd(CommandContext& ctx, CommandArgs args) {
   auto parsed = ParseCanonicalInt(args[2]);
   if (!std::holds_alternative<ParsedInt>(parsed)) return InvalidInteger();
   int64_t delta = -std::get<ParsedInt>(parsed).value;
@@ -238,8 +222,7 @@ static std::string DecrByCmd(CommandContext& ctx,
   return RespReply::Integer(std::get<int64_t>(result));
 }
 
-static std::string IncrByFloatCmd(CommandContext& ctx,
-                                  const std::vector<std::string>& args) {
+static std::string IncrByFloatCmd(CommandContext& ctx, CommandArgs args) {
   auto parsed = ParseFiniteDouble(args[2]);
   if (std::holds_alternative<TypeError>(parsed))
     return TypeErrorToResp(std::get<TypeError>(parsed));
@@ -257,8 +240,7 @@ static std::string IncrByFloatCmd(CommandContext& ctx,
   return RespReply::BulkString(existing->ToString());
 }
 
-static std::string MGetCmd(CommandContext& ctx,
-                           const std::vector<std::string>& args) {
+static std::string MGetCmd(CommandContext& ctx, CommandArgs args) {
   std::vector<std::string> result;
   for (size_t i = 1; i < args.size(); i++) {
     auto* val = ctx.db.Find(args[i]);
@@ -272,16 +254,14 @@ static std::string MGetCmd(CommandContext& ctx,
   return RespReply::ArrayOfEncoded(result);
 }
 
-static std::string MSetCmd(CommandContext& ctx,
-                           const std::vector<std::string>& args) {
+static std::string MSetCmd(CommandContext& ctx, CommandArgs args) {
   if ((args.size() - 1) % 2 != 0) return WrongArity("MSET");
   for (size_t i = 1; i + 1 < args.size(); i += 2)
     ctx.db.Set(args[i], StringValue(args[i + 1]));
   return RespReply::Ok();
 }
 
-static std::string MSetNXCmd(CommandContext& ctx,
-                             const std::vector<std::string>& args) {
+static std::string MSetNXCmd(CommandContext& ctx, CommandArgs args) {
   if ((args.size() - 1) % 2 != 0) return WrongArity("MSETNX");
   for (size_t i = 1; i + 1 < args.size(); i += 2)
     if (ctx.db.Exists(args[i])) return RespReply::Integer(0);

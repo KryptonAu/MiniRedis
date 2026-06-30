@@ -14,17 +14,17 @@ namespace miniredis {
 
 using Flag = CommandFlag;
 
-static ZSetValue* GetZSet(CommandContext& ctx, const std::string& key) {
+static ZSetValue* GetZSet(CommandContext& ctx, std::string_view key) {
   auto* v = ctx.db.Find(key);
   return v ? std::get_if<ZSetValue>(v) : nullptr;
 }
 
-static bool IsZSetWrongType(CommandContext& ctx, const std::string& key) {
+static bool IsZSetWrongType(CommandContext& ctx, std::string_view key) {
   auto* val = ctx.db.Find(key);
   return val && !std::holds_alternative<ZSetValue>(*val);
 }
 
-static ZSetValue& GetOrCreateZSet(CommandContext& ctx, const std::string& key) {
+static ZSetValue& GetOrCreateZSet(CommandContext& ctx, std::string_view key) {
   auto* v = ctx.db.Find(key);
   if (!v) {
     ctx.db.Set(key, MakeZSetValue(ctx));
@@ -34,8 +34,7 @@ static ZSetValue& GetOrCreateZSet(CommandContext& ctx, const std::string& key) {
 }
 
 // ===== ZADD =====
-static std::string ZAddCmd(CommandContext& ctx,
-                           const std::vector<std::string>& args) {
+static std::string ZAddCmd(CommandContext& ctx, CommandArgs args) {
   size_t i = 2;
   bool nx = false, xx = false, ch = false, incr = false;
 
@@ -62,7 +61,7 @@ static std::string ZAddCmd(CommandContext& ctx,
     if (std::holds_alternative<TypeError>(sc_parsed))
       return TypeErrorToResp(std::get<TypeError>(sc_parsed));
     double score = std::get<double>(sc_parsed);
-    std::string const& member = args[i];
+    std::string_view member = args[i];
     auto* val = ctx.db.Find(args[1]);
     if (val && !std::holds_alternative<ZSetValue>(*val))
       return RespReply::WrongType();
@@ -113,8 +112,7 @@ static std::string ZAddCmd(CommandContext& ctx,
 }
 
 // ===== ZREM =====
-static std::string ZRemCmd(CommandContext& ctx,
-                           const std::vector<std::string>& args) {
+static std::string ZRemCmd(CommandContext& ctx, CommandArgs args) {
   auto* val = ctx.db.Find(args[1]);
   if (val && !std::holds_alternative<ZSetValue>(*val))
     return RespReply::WrongType();
@@ -128,8 +126,7 @@ static std::string ZRemCmd(CommandContext& ctx,
 }
 
 // ===== ZCARD =====
-static std::string ZCardCmd(CommandContext& ctx,
-                            const std::vector<std::string>& args) {
+static std::string ZCardCmd(CommandContext& ctx, CommandArgs args) {
   auto* val = ctx.db.Find(args[1]);
   if (val && !std::holds_alternative<ZSetValue>(*val))
     return RespReply::WrongType();
@@ -138,8 +135,7 @@ static std::string ZCardCmd(CommandContext& ctx,
 }
 
 // ===== ZCOUNT =====
-static std::string ZCountCmd(CommandContext& ctx,
-                             const std::vector<std::string>& args) {
+static std::string ZCountCmd(CommandContext& ctx, CommandArgs args) {
   auto* val = ctx.db.Find(args[1]);
   if (val && !std::holds_alternative<ZSetValue>(*val))
     return RespReply::WrongType();
@@ -156,8 +152,7 @@ static std::string ZCountCmd(CommandContext& ctx,
 }
 
 // ===== ZSCORE =====
-static std::string ZScoreCmd(CommandContext& ctx,
-                             const std::vector<std::string>& args) {
+static std::string ZScoreCmd(CommandContext& ctx, CommandArgs args) {
   auto* val = ctx.db.Find(args[1]);
   if (val && !std::holds_alternative<ZSetValue>(*val))
     return RespReply::WrongType();
@@ -169,8 +164,7 @@ static std::string ZScoreCmd(CommandContext& ctx,
 }
 
 // ===== ZRANK / ZREVRANK =====
-static std::string ZRankCmd(CommandContext& ctx,
-                            const std::vector<std::string>& args) {
+static std::string ZRankCmd(CommandContext& ctx, CommandArgs args) {
   auto* val = ctx.db.Find(args[1]);
   if (val && !std::holds_alternative<ZSetValue>(*val))
     return RespReply::WrongType();
@@ -179,8 +173,7 @@ static std::string ZRankCmd(CommandContext& ctx,
   auto r = zs->Rank(args[2]);
   return r ? RespReply::Integer(static_cast<int64_t>(*r)) : RespReply::Nil();
 }
-static std::string ZRevRankCmd(CommandContext& ctx,
-                               const std::vector<std::string>& args) {
+static std::string ZRevRankCmd(CommandContext& ctx, CommandArgs args) {
   auto* val = ctx.db.Find(args[1]);
   if (val && !std::holds_alternative<ZSetValue>(*val))
     return RespReply::WrongType();
@@ -191,8 +184,7 @@ static std::string ZRevRankCmd(CommandContext& ctx,
 }
 
 // ===== ZINCRBY =====
-static std::string ZIncrByCmd(CommandContext& ctx,
-                              const std::vector<std::string>& args) {
+static std::string ZIncrByCmd(CommandContext& ctx, CommandArgs args) {
   auto* val = ctx.db.Find(args[1]);
   if (val && !std::holds_alternative<ZSetValue>(*val))
     return RespReply::WrongType();
@@ -207,8 +199,7 @@ static std::string ZIncrByCmd(CommandContext& ctx,
 }
 
 // ===== ZRANGE / ZREVRANGE =====
-static std::string ZRangeCmd(CommandContext& ctx,
-                             const std::vector<std::string>& args) {
+static std::string ZRangeCmd(CommandContext& ctx, CommandArgs args) {
   auto* val_zr = ctx.db.Find(args[1]);
   if (val_zr && !std::holds_alternative<ZSetValue>(*val_zr))
     return RespReply::WrongType();
@@ -230,8 +221,7 @@ static std::string ZRangeCmd(CommandContext& ctx,
   return ArrayOfZSetRange(r, withscores);
 }
 
-static std::string ZRevRangeCmd(CommandContext& ctx,
-                                const std::vector<std::string>& args) {
+static std::string ZRevRangeCmd(CommandContext& ctx, CommandArgs args) {
   auto* val_zrr = ctx.db.Find(args[1]);
   if (val_zrr && !std::holds_alternative<ZSetValue>(*val_zrr))
     return RespReply::WrongType();
@@ -254,8 +244,7 @@ static std::string ZRevRangeCmd(CommandContext& ctx,
 }
 
 // ===== ZRANGEBYSCORE =====
-static std::string ZRangeByScoreCmd(CommandContext& ctx,
-                                    const std::vector<std::string>& args) {
+static std::string ZRangeByScoreCmd(CommandContext& ctx, CommandArgs args) {
   if (IsZSetWrongType(ctx, args[1])) return RespReply::WrongType();
   auto min_p = ParseFiniteDouble(args[2]), max_p = ParseFiniteDouble(args[3]);
   if (std::holds_alternative<TypeError>(min_p) ||
@@ -292,8 +281,7 @@ static std::string ZRangeByScoreCmd(CommandContext& ctx,
 }
 
 // ===== ZPOPMIN / ZPOPMAX =====
-static std::string ZPopMinCmd(CommandContext& ctx,
-                              const std::vector<std::string>& args) {
+static std::string ZPopMinCmd(CommandContext& ctx, CommandArgs args) {
   if (args.size() > 3) return WrongArity("ZPOPMIN");
   if (IsZSetWrongType(ctx, args[1])) return RespReply::WrongType();
   int64_t count = 1;
@@ -314,8 +302,7 @@ static std::string ZPopMinCmd(CommandContext& ctx,
   if (zs->Count() == 0) ctx.db.Delete(args[1]);
   return ArrayOfZSetRange(v, true);
 }
-static std::string ZPopMaxCmd(CommandContext& ctx,
-                              const std::vector<std::string>& args) {
+static std::string ZPopMaxCmd(CommandContext& ctx, CommandArgs args) {
   if (args.size() > 3) return WrongArity("ZPOPMAX");
   if (IsZSetWrongType(ctx, args[1])) return RespReply::WrongType();
   int64_t count = 1;
@@ -338,8 +325,7 @@ static std::string ZPopMaxCmd(CommandContext& ctx,
 }
 
 // ===== ZREMRANGEBYRANK =====
-static std::string ZRemRangeByRankCmd(CommandContext& ctx,
-                                      const std::vector<std::string>& args) {
+static std::string ZRemRangeByRankCmd(CommandContext& ctx, CommandArgs args) {
   if (IsZSetWrongType(ctx, args[1])) return RespReply::WrongType();
   auto* zs = GetZSet(ctx, args[1]);
   if (!zs) return RespReply::Integer(0);
@@ -354,8 +340,7 @@ static std::string ZRemRangeByRankCmd(CommandContext& ctx,
 }
 
 // ===== ZREMRANGEBYSCORE =====
-static std::string ZRemRangeByScoreCmd(CommandContext& ctx,
-                                       const std::vector<std::string>& args) {
+static std::string ZRemRangeByScoreCmd(CommandContext& ctx, CommandArgs args) {
   if (IsZSetWrongType(ctx, args[1])) return RespReply::WrongType();
   auto* zs = GetZSet(ctx, args[1]);
   if (!zs) return RespReply::Integer(0);

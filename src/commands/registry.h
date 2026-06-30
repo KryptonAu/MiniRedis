@@ -6,6 +6,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include "commands/command_args.h"
+
 namespace miniredis {
 
 struct CommandContext;
@@ -25,8 +27,7 @@ inline uint32_t operator|(uint32_t a, CommandFlag b) {
 }
 
 struct CommandInfo {
-  using Func = std::string (*)(CommandContext&,
-                               const std::vector<std::string>&);
+  using Func = std::string (*)(CommandContext&, CommandArgs);
   std::string name;
   int arity;
   uint32_t flags = 0;

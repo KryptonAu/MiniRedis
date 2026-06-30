@@ -27,8 +27,7 @@ static bool CheckedExpireAtFromNow(int64_t duration_ms, int64_t& expire_at) {
   return true;
 }
 
-static std::string DelCmd(CommandContext& ctx,
-                          const std::vector<std::string>& args) {
+static std::string DelCmd(CommandContext& ctx, CommandArgs args) {
   int deleted = 0;
   for (size_t i = 1; i < args.size(); i++) {
     if (ctx.db.Delete(args[i])) deleted++;
@@ -36,8 +35,7 @@ static std::string DelCmd(CommandContext& ctx,
   return RespReply::Integer(deleted);
 }
 
-static std::string ExistsCmd(CommandContext& ctx,
-                             const std::vector<std::string>& args) {
+static std::string ExistsCmd(CommandContext& ctx, CommandArgs args) {
   int count = 0;
   for (size_t i = 1; i < args.size(); i++) {
     if (ctx.db.Exists(args[i])) count++;
@@ -45,15 +43,13 @@ static std::string ExistsCmd(CommandContext& ctx,
   return RespReply::Integer(count);
 }
 
-static std::string TypeCmd(CommandContext& ctx,
-                           const std::vector<std::string>& args) {
+static std::string TypeCmd(CommandContext& ctx, CommandArgs args) {
   auto t = ctx.db.Type(args[1]);
   if (!t) return RespReply::SimpleString("none");
   return RespReply::SimpleString(std::string(TypeName(*t)));
 }
 
-static std::string ExpireCmd(CommandContext& ctx,
-                             const std::vector<std::string>& args) {
+static std::string ExpireCmd(CommandContext& ctx, CommandArgs args) {
   auto parsed = ParseCanonicalInt(args[2]);
   if (!std::holds_alternative<ParsedInt>(parsed)) return InvalidInteger();
   int64_t sec = std::get<ParsedInt>(parsed).value;
@@ -66,8 +62,7 @@ static std::string ExpireCmd(CommandContext& ctx,
   return RespReply::Integer(ctx.db.SetExpire(args[1], expire_at) ? 1 : 0);
 }
 
-static std::string PExpireCmd(CommandContext& ctx,
-                              const std::vector<std::string>& args) {
+static std::string PExpireCmd(CommandContext& ctx, CommandArgs args) {
   auto parsed = ParseCanonicalInt(args[2]);
   if (!std::holds_alternative<ParsedInt>(parsed)) return InvalidInteger();
   int64_t ms = std::get<ParsedInt>(parsed).value;
@@ -77,8 +72,7 @@ static std::string PExpireCmd(CommandContext& ctx,
   return RespReply::Integer(ctx.db.SetExpire(args[1], expire_at) ? 1 : 0);
 }
 
-static std::string ExpireAtCmd(CommandContext& ctx,
-                               const std::vector<std::string>& args) {
+static std::string ExpireAtCmd(CommandContext& ctx, CommandArgs args) {
   auto parsed = ParseCanonicalInt(args[2]);
   if (!std::holds_alternative<ParsedInt>(parsed)) return InvalidInteger();
   int64_t unix_sec = std::get<ParsedInt>(parsed).value;
@@ -88,8 +82,7 @@ static std::string ExpireAtCmd(CommandContext& ctx,
   return RespReply::Integer(ctx.db.SetExpire(args[1], expire_at) ? 1 : 0);
 }
 
-static std::string PExpireAtCmd(CommandContext& ctx,
-                                const std::vector<std::string>& args) {
+static std::string PExpireAtCmd(CommandContext& ctx, CommandArgs args) {
   auto parsed = ParseCanonicalInt(args[2]);
   if (!std::holds_alternative<ParsedInt>(parsed)) return InvalidInteger();
   int64_t unix_ms = std::get<ParsedInt>(parsed).value;
@@ -97,46 +90,39 @@ static std::string PExpireAtCmd(CommandContext& ctx,
   return RespReply::Integer(ctx.db.SetExpire(args[1], unix_ms) ? 1 : 0);
 }
 
-static std::string TtlCmd(CommandContext& ctx,
-                          const std::vector<std::string>& args) {
+static std::string TtlCmd(CommandContext& ctx, CommandArgs args) {
   int64_t ms = ctx.db.TTL(args[1]);
   if (ms < 0) return RespReply::Integer(ms);  // -2 or -1
   return RespReply::Integer(MsToSec(ms));
 }
 
-static std::string PTtlCmd(CommandContext& ctx,
-                           const std::vector<std::string>& args) {
+static std::string PTtlCmd(CommandContext& ctx, CommandArgs args) {
   return RespReply::Integer(ctx.db.TTL(args[1]));
 }
 
-static std::string PersistCmd(CommandContext& ctx,
-                              const std::vector<std::string>& args) {
+static std::string PersistCmd(CommandContext& ctx, CommandArgs args) {
   return RespReply::Integer(ctx.db.Persist(args[1]) ? 1 : 0);
 }
 
-static std::string KeysCmd(CommandContext& ctx,
-                           const std::vector<std::string>& args) {
+static std::string KeysCmd(CommandContext& ctx, CommandArgs args) {
   if (args[1] != "*") return Unsupported("KEYS pattern");
   auto keys = ctx.db.Keys("*");
   return RespReply::ArrayOfBulkStrings(keys);
 }
 
-static std::string RandomKeyCmd(CommandContext& ctx,
-                                const std::vector<std::string>&) {
+static std::string RandomKeyCmd(CommandContext& ctx, CommandArgs) {
   auto key = ctx.db.RandomKey();
   if (!key) return RespReply::Nil();
   return RespReply::BulkString(*key);
 }
 
-static std::string RenameCmd(CommandContext& ctx,
-                             const std::vector<std::string>& args) {
+static std::string RenameCmd(CommandContext& ctx, CommandArgs args) {
   if (!ctx.db.Rename(args[1], args[2]))
     return RespReply::Error("ERR no such key");
   return RespReply::Ok();
 }
 
-static std::string RenameNXCmd(CommandContext& ctx,
-                               const std::vector<std::string>& args) {
+static std::string RenameNXCmd(CommandContext& ctx, CommandArgs args) {
   return RespReply::Integer(ctx.db.RenameNX(args[1], args[2]) ? 1 : 0);
 }
 

@@ -9,18 +9,18 @@ namespace miniredis {
 
 using Flag = CommandFlag;
 
-static ListValue* GetList(CommandContext& ctx, const std::string& key) {
+static ListValue* GetList(CommandContext& ctx, std::string_view key) {
   auto* val = ctx.db.Find(key);
   if (!val) return nullptr;
   return std::get_if<ListValue>(val);
 }
 
-static bool IsListWrongType(CommandContext& ctx, const std::string& key) {
+static bool IsListWrongType(CommandContext& ctx, std::string_view key) {
   auto* val = ctx.db.Find(key);
   return val && !std::holds_alternative<ListValue>(*val);
 }
 
-static ListValue& GetOrCreateList(CommandContext& ctx, const std::string& key) {
+static ListValue& GetOrCreateList(CommandContext& ctx, std::string_view key) {
   auto* val = ctx.db.Find(key);
   if (!val) {
     ctx.db.Set(key, ListValue{});
@@ -31,8 +31,7 @@ static ListValue& GetOrCreateList(CommandContext& ctx, const std::string& key) {
   return *lv;
 }
 
-static std::string LPushCmd(CommandContext& ctx,
-                            const std::vector<std::string>& args) {
+static std::string LPushCmd(CommandContext& ctx, CommandArgs args) {
   auto* val = ctx.db.Find(args[1]);
   if (val && !std::holds_alternative<ListValue>(*val))
     return RespReply::WrongType();
@@ -41,8 +40,7 @@ static std::string LPushCmd(CommandContext& ctx,
   return RespReply::Integer(static_cast<int64_t>(lv.Size()));
 }
 
-static std::string RPushCmd(CommandContext& ctx,
-                            const std::vector<std::string>& args) {
+static std::string RPushCmd(CommandContext& ctx, CommandArgs args) {
   auto* val = ctx.db.Find(args[1]);
   if (val && !std::holds_alternative<ListValue>(*val))
     return RespReply::WrongType();
@@ -51,8 +49,7 @@ static std::string RPushCmd(CommandContext& ctx,
   return RespReply::Integer(static_cast<int64_t>(lv.Size()));
 }
 
-static std::string LPushXCmd(CommandContext& ctx,
-                             const std::vector<std::string>& args) {
+static std::string LPushXCmd(CommandContext& ctx, CommandArgs args) {
   if (IsListWrongType(ctx, args[1])) return RespReply::WrongType();
   auto* lv = GetList(ctx, args[1]);
   if (!lv) return RespReply::Integer(0);
@@ -60,8 +57,7 @@ static std::string LPushXCmd(CommandContext& ctx,
   return RespReply::Integer(static_cast<int64_t>(lv->Size()));
 }
 
-static std::string RPushXCmd(CommandContext& ctx,
-                             const std::vector<std::string>& args) {
+static std::string RPushXCmd(CommandContext& ctx, CommandArgs args) {
   if (IsListWrongType(ctx, args[1])) return RespReply::WrongType();
   auto* lv = GetList(ctx, args[1]);
   if (!lv) return RespReply::Integer(0);
@@ -69,8 +65,7 @@ static std::string RPushXCmd(CommandContext& ctx,
   return RespReply::Integer(static_cast<int64_t>(lv->Size()));
 }
 
-static std::string LPopCmd(CommandContext& ctx,
-                           const std::vector<std::string>& args) {
+static std::string LPopCmd(CommandContext& ctx, CommandArgs args) {
   auto* val = ctx.db.Find(args[1]);
   if (val && !std::holds_alternative<ListValue>(*val))
     return RespReply::WrongType();
@@ -82,8 +77,7 @@ static std::string LPopCmd(CommandContext& ctx,
   return RespReply::BulkString(*r);
 }
 
-static std::string RPopCmd(CommandContext& ctx,
-                           const std::vector<std::string>& args) {
+static std::string RPopCmd(CommandContext& ctx, CommandArgs args) {
   auto* val_rp = ctx.db.Find(args[1]);
   if (val_rp && !std::holds_alternative<ListValue>(*val_rp))
     return RespReply::WrongType();
@@ -95,8 +89,7 @@ static std::string RPopCmd(CommandContext& ctx,
   return RespReply::BulkString(*r);
 }
 
-static std::string LLenCmd(CommandContext& ctx,
-                           const std::vector<std::string>& args) {
+static std::string LLenCmd(CommandContext& ctx, CommandArgs args) {
   auto* val = ctx.db.Find(args[1]);
   if (val && !std::holds_alternative<ListValue>(*val))
     return RespReply::WrongType();
@@ -104,8 +97,7 @@ static std::string LLenCmd(CommandContext& ctx,
   return RespReply::Integer(lv ? static_cast<int64_t>(lv->Size()) : 0);
 }
 
-static std::string LIndexCmd(CommandContext& ctx,
-                             const std::vector<std::string>& args) {
+static std::string LIndexCmd(CommandContext& ctx, CommandArgs args) {
   if (IsListWrongType(ctx, args[1])) return RespReply::WrongType();
   auto* lv = GetList(ctx, args[1]);
   if (!lv) return RespReply::Nil();
@@ -115,8 +107,7 @@ static std::string LIndexCmd(CommandContext& ctx,
   return v ? RespReply::BulkString(*v) : RespReply::Nil();
 }
 
-static std::string LRangeCmd(CommandContext& ctx,
-                             const std::vector<std::string>& args) {
+static std::string LRangeCmd(CommandContext& ctx, CommandArgs args) {
   if (IsListWrongType(ctx, args[1])) return RespReply::WrongType();
   auto* lv = GetList(ctx, args[1]);
   if (!lv) return RespReply::EmptyArray();
@@ -128,8 +119,7 @@ static std::string LRangeCmd(CommandContext& ctx,
       lv->Range(std::get<ParsedInt>(p1).value, std::get<ParsedInt>(p2).value));
 }
 
-static std::string LTrimCmd(CommandContext& ctx,
-                            const std::vector<std::string>& args) {
+static std::string LTrimCmd(CommandContext& ctx, CommandArgs args) {
   if (IsListWrongType(ctx, args[1])) return RespReply::WrongType();
   auto* lv = GetList(ctx, args[1]);
   if (!lv) return RespReply::Ok();
@@ -142,8 +132,7 @@ static std::string LTrimCmd(CommandContext& ctx,
   return RespReply::Ok();
 }
 
-static std::string LRemCmd(CommandContext& ctx,
-                           const std::vector<std::string>& args) {
+static std::string LRemCmd(CommandContext& ctx, CommandArgs args) {
   if (IsListWrongType(ctx, args[1])) return RespReply::WrongType();
   auto* lv = GetList(ctx, args[1]);
   if (!lv) return RespReply::Integer(0);
@@ -154,8 +143,7 @@ static std::string LRemCmd(CommandContext& ctx,
   return RespReply::Integer(static_cast<int64_t>(r));
 }
 
-static std::string RPopLPushCmd(CommandContext& ctx,
-                                const std::vector<std::string>& args) {
+static std::string RPopLPushCmd(CommandContext& ctx, CommandArgs args) {
   if (IsListWrongType(ctx, args[1])) return RespReply::WrongType();
   auto* src = GetList(ctx, args[1]);
   if (!src) return RespReply::Nil();

@@ -10,11 +10,11 @@ namespace miniredis {
 
 using Flag = CommandFlag;
 
-static HashValue* GetHash(CommandContext& ctx, const std::string& key) {
+static HashValue* GetHash(CommandContext& ctx, std::string_view key) {
   auto* v = ctx.db.Find(key);
   return v ? std::get_if<HashValue>(v) : nullptr;
 }
-static HashValue& GetOrCreateHash(CommandContext& ctx, const std::string& key) {
+static HashValue& GetOrCreateHash(CommandContext& ctx, std::string_view key) {
   auto* v = ctx.db.Find(key);
   if (!v) {
     ctx.db.Set(key, MakeHashValue(ctx));
@@ -23,8 +23,7 @@ static HashValue& GetOrCreateHash(CommandContext& ctx, const std::string& key) {
   return std::get<HashValue>(*v);
 }
 
-static std::string HSetCmd(CommandContext& ctx,
-                           const std::vector<std::string>& args) {
+static std::string HSetCmd(CommandContext& ctx, CommandArgs args) {
   if ((args.size() - 2) % 2 != 0) return WrongArity("HSET");
   auto* val = ctx.db.Find(args[1]);
   if (val && !std::holds_alternative<HashValue>(*val))
@@ -35,8 +34,7 @@ static std::string HSetCmd(CommandContext& ctx,
     if (hv.Set(args[i], args[i + 1])) created++;
   return RespReply::Integer(created);
 }
-static std::string HGetCmd(CommandContext& ctx,
-                           const std::vector<std::string>& args) {
+static std::string HGetCmd(CommandContext& ctx, CommandArgs args) {
   auto* val = ctx.db.Find(args[1]);
   if (val && !std::holds_alternative<HashValue>(*val))
     return RespReply::WrongType();
@@ -45,8 +43,7 @@ static std::string HGetCmd(CommandContext& ctx,
   auto v = hv->Get(args[2]);
   return v ? RespReply::BulkString(*v) : RespReply::Nil();
 }
-static std::string HDelCmd(CommandContext& ctx,
-                           const std::vector<std::string>& args) {
+static std::string HDelCmd(CommandContext& ctx, CommandArgs args) {
   auto* val = ctx.db.Find(args[1]);
   if (val && !std::holds_alternative<HashValue>(*val))
     return RespReply::WrongType();
@@ -58,24 +55,21 @@ static std::string HDelCmd(CommandContext& ctx,
   if (hv->Size() == 0) ctx.db.Delete(args[1]);
   return RespReply::Integer(deleted);
 }
-static std::string HLenCmd(CommandContext& ctx,
-                           const std::vector<std::string>& args) {
+static std::string HLenCmd(CommandContext& ctx, CommandArgs args) {
   auto* val = ctx.db.Find(args[1]);
   if (val && !std::holds_alternative<HashValue>(*val))
     return RespReply::WrongType();
   auto* hv = GetHash(ctx, args[1]);
   return RespReply::Integer(hv ? static_cast<int64_t>(hv->Size()) : 0);
 }
-static std::string HExistsCmd(CommandContext& ctx,
-                              const std::vector<std::string>& args) {
+static std::string HExistsCmd(CommandContext& ctx, CommandArgs args) {
   auto* val = ctx.db.Find(args[1]);
   if (val && !std::holds_alternative<HashValue>(*val))
     return RespReply::WrongType();
   auto* hv = GetHash(ctx, args[1]);
   return RespReply::Integer(hv && hv->Exists(args[2]) ? 1 : 0);
 }
-static std::string HKeysCmd(CommandContext& ctx,
-                            const std::vector<std::string>& args) {
+static std::string HKeysCmd(CommandContext& ctx, CommandArgs args) {
   auto* val = ctx.db.Find(args[1]);
   if (val && !std::holds_alternative<HashValue>(*val))
     return RespReply::WrongType();
@@ -83,8 +77,7 @@ static std::string HKeysCmd(CommandContext& ctx,
   if (!hv) return RespReply::EmptyArray();
   return RespReply::ArrayOfBulkStrings(hv->Keys());
 }
-static std::string HValsCmd(CommandContext& ctx,
-                            const std::vector<std::string>& args) {
+static std::string HValsCmd(CommandContext& ctx, CommandArgs args) {
   auto* val = ctx.db.Find(args[1]);
   if (val && !std::holds_alternative<HashValue>(*val))
     return RespReply::WrongType();
@@ -92,8 +85,7 @@ static std::string HValsCmd(CommandContext& ctx,
   if (!hv) return RespReply::EmptyArray();
   return RespReply::ArrayOfBulkStrings(hv->Values());
 }
-static std::string HGetAllCmd(CommandContext& ctx,
-                              const std::vector<std::string>& args) {
+static std::string HGetAllCmd(CommandContext& ctx, CommandArgs args) {
   auto* val = ctx.db.Find(args[1]);
   if (val && !std::holds_alternative<HashValue>(*val))
     return RespReply::WrongType();
@@ -107,8 +99,7 @@ static std::string HGetAllCmd(CommandContext& ctx,
   }
   return RespReply::ArrayOfBulkStrings(flat);
 }
-static std::string HIncrByCmd(CommandContext& ctx,
-                              const std::vector<std::string>& args) {
+static std::string HIncrByCmd(CommandContext& ctx, CommandArgs args) {
   auto* val = ctx.db.Find(args[1]);
   if (val && !std::holds_alternative<HashValue>(*val))
     return RespReply::WrongType();

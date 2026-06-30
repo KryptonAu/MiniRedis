@@ -5,9 +5,7 @@
 namespace miniredis {
 namespace {
 
-static std::string TestCmd(CommandContext&, const std::vector<std::string>&) {
-  return "+OK\r\n";
-}
+static std::string TestCmd(CommandContext&, CommandArgs) { return "+OK\r\n"; }
 
 TEST(RegistryTest, FindCaseInsensitive) {
   CommandRegistry reg;

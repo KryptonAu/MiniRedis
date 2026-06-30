@@ -11,20 +11,17 @@
 
 namespace miniredis {
 
-static std::string PingCmd(CommandContext&,
-                           const std::vector<std::string>& args) {
+static std::string PingCmd(CommandContext&, CommandArgs args) {
   if (args.size() == 1) return RespReply::SimpleString("PONG");
   if (args.size() == 2) return RespReply::BulkString(args[1]);
   return WrongArity("PING");
 }
 
-static std::string EchoCmd(CommandContext&,
-                           const std::vector<std::string>& args) {
+static std::string EchoCmd(CommandContext&, CommandArgs args) {
   return RespReply::BulkString(args[1]);
 }
 
-static std::string SelectCmd(CommandContext& ctx,
-                             const std::vector<std::string>& args) {
+static std::string SelectCmd(CommandContext& ctx, CommandArgs args) {
   int index = 0;
   auto parsed = ParseCanonicalInt(args[1]);
   if (!std::holds_alternative<ParsedInt>(parsed)) return InvalidInteger();
@@ -34,24 +31,21 @@ static std::string SelectCmd(CommandContext& ctx,
   return RespReply::Ok();
 }
 
-static std::string DbSizeCmd(CommandContext& ctx,
-                             const std::vector<std::string>&) {
+static std::string DbSizeCmd(CommandContext& ctx, CommandArgs) {
   return RespReply::Integer(static_cast<int64_t>(ctx.db.Size()));
 }
 
-static std::string FlushDbCmd(CommandContext& ctx,
-                              const std::vector<std::string>&) {
+static std::string FlushDbCmd(CommandContext& ctx, CommandArgs) {
   ctx.db.Clear();
   return RespReply::Ok();
 }
 
-static std::string FlushAllCmd(CommandContext& ctx,
-                               const std::vector<std::string>&) {
+static std::string FlushAllCmd(CommandContext& ctx, CommandArgs) {
   ctx.server.FlushAll();
   return RespReply::Ok();
 }
 
-static std::string TimeCmd(CommandContext&, const std::vector<std::string>&) {
+static std::string TimeCmd(CommandContext&, CommandArgs) {
   auto now = std::chrono::system_clock::now().time_since_epoch();
   int64_t sec = std::chrono::duration_cast<std::chrono::seconds>(now).count();
   int64_t us =
@@ -62,15 +56,13 @@ static std::string TimeCmd(CommandContext&, const std::vector<std::string>&) {
   return RespReply::ArrayOfEncoded(v);
 }
 
-static std::string CommandCmd(CommandContext&,
-                              const std::vector<std::string>& args) {
+static std::string CommandCmd(CommandContext&, CommandArgs args) {
   if (args.size() != 1) return Unsupported("COMMAND subcommand");
   auto registry = CreateDefaultCommandRegistry();
   return RespReply::ArrayOfBulkStrings(registry.CommandNames());
 }
 
-static std::string SaveCmd(CommandContext& ctx,
-                           const std::vector<std::string>&) {
+static std::string SaveCmd(CommandContext& ctx, CommandArgs) {
   RdbSerializer serializer;
   auto& cfg = ctx.server.GetConfig();
   if (!serializer.Save(cfg.rdb_filename, ctx.server)) {
@@ -83,15 +75,13 @@ static std::string SaveCmd(CommandContext& ctx,
   return RespReply::Ok();
 }
 
-static std::string LastSaveCmd(CommandContext& ctx,
-                               const std::vector<std::string>&) {
+static std::string LastSaveCmd(CommandContext& ctx, CommandArgs) {
   int64_t ms = ctx.server.GetLastSaveMs();
   if (ms == 0) return RespReply::Integer(0);
   return RespReply::Integer(ms / 1000);
 }
 
-static std::string ConfigCmd(CommandContext& ctx,
-                             const std::vector<std::string>& args) {
+static std::string ConfigCmd(CommandContext& ctx, CommandArgs args) {
   if (args.size() < 3) return WrongArity("CONFIG");
   if (args[1] == "GET") {
     if (args.size() != 3) return WrongArity("CONFIG");
@@ -163,8 +153,7 @@ static std::string ConfigCmd(CommandContext& ctx,
   return SyntaxError();
 }
 
-static std::string InfoCmd(CommandContext& ctx,
-                           const std::vector<std::string>& args) {
+static std::string InfoCmd(CommandContext& ctx, CommandArgs args) {
   if (args.size() > 2) return WrongArity("INFO");
   std::ostringstream oss;
 

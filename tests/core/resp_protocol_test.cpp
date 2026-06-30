@@ -2,6 +2,9 @@
 
 #include <gtest/gtest.h>
 
+#include <string>
+#include <vector>
+
 namespace miniredis {
 namespace {
 
@@ -15,6 +18,7 @@ TEST(RespParserTest, ParseSimpleCommand) {
   ASSERT_EQ(cmd.size(), 2);
   EXPECT_EQ(cmd[0], "GET");
   EXPECT_EQ(cmd[1], "key");
+  EXPECT_EQ(cmd.ToOwnedVector(), std::vector<std::string>({"GET", "key"}));
 }
 
 TEST(RespParserTest, ParseSetCommand) {
@@ -61,6 +65,64 @@ TEST(RespParserTest, PipeliningTwoCommands) {
   EXPECT_EQ(parser.PendingCommandCount(), 1);
   auto cmd2 = parser.TakeCommand();
   EXPECT_EQ(parser.PendingCommandCount(), 0);
+}
+
+TEST(RespParserTest, TakenCommandSurvivesLaterFeed) {
+  RespParser parser;
+  ASSERT_EQ(parser.Feed("*1\r\n$4\r\nPING\r\n"), ParseStatus::kComplete);
+  RespCommand first = parser.TakeCommand();
+
+  ASSERT_EQ(parser.Feed("*2\r\n$4\r\nECHO\r\n$3\r\nhey\r\n"),
+            ParseStatus::kComplete);
+  RespCommand second = parser.TakeCommand();
+
+  EXPECT_EQ(first.size(), 1);
+  EXPECT_EQ(first[0], "PING");
+  EXPECT_EQ(first.ToOwnedVector(), std::vector<std::string>({"PING"}));
+  ASSERT_EQ(second.size(), 2);
+  EXPECT_EQ(second[0], "ECHO");
+  EXPECT_EQ(second[1], "hey");
+}
+
+TEST(RespParserTest, LargePipelineKeepsOrderAndClearsBuffer) {
+  RespParser parser;
+  std::string input;
+  constexpr int kCommandCount = 10000;
+  std::string frame = "*1\r\n$4\r\nPING\r\n";
+  input.reserve(frame.size() * kCommandCount);
+  for (int i = 0; i < kCommandCount; i++) {
+    input += frame;
+  }
+
+  EXPECT_EQ(parser.Feed(input), ParseStatus::kComplete);
+  EXPECT_EQ(parser.PendingCommandCount(), static_cast<size_t>(kCommandCount));
+  EXPECT_EQ(parser.BufferSize(), 0);
+
+  for (int i = 0; i < kCommandCount; i++) {
+    RespCommand cmd = parser.TakeCommand();
+    ASSERT_EQ(cmd.size(), 1);
+    EXPECT_EQ(cmd[0], "PING");
+  }
+  EXPECT_FALSE(parser.HasCommand());
+}
+
+TEST(RespParserTest, LargeBulkStringCanArriveInPieces) {
+  RespParser parser;
+  std::string value(64 * 1024, 'x');
+  std::string prefix =
+      "*2\r\n$3\r\nSET\r\n$" + std::to_string(value.size()) + "\r\n";
+
+  EXPECT_EQ(parser.Feed(prefix), ParseStatus::kIncomplete);
+  EXPECT_FALSE(parser.HasCommand());
+  EXPECT_EQ(parser.BufferSize(), prefix.size());
+
+  EXPECT_EQ(parser.Feed(value + "\r\n"), ParseStatus::kComplete);
+  ASSERT_TRUE(parser.HasCommand());
+  RespCommand cmd = parser.TakeCommand();
+  ASSERT_EQ(cmd.size(), 2);
+  EXPECT_EQ(cmd[0], "SET");
+  EXPECT_EQ(cmd[1], value);
+  EXPECT_EQ(parser.BufferSize(), 0);
 }
 
 // ===== Parser: error cases =====

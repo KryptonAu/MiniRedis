@@ -46,8 +46,7 @@ bool IsWriteAllowedWhenOom(std::string_view command_name) {
 }  // namespace
 
 CommandResult ExecuteCommandDetailed(CommandRegistry& registry,
-                                     CommandContext& context,
-                                     const std::vector<std::string>& args,
+                                     CommandContext& context, CommandArgs args,
                                      bool replay_mode) {
   CommandResult result;
 
@@ -117,7 +116,7 @@ CommandResult ExecuteCommandDetailed(CommandRegistry& registry,
   // Build propagate_args (only when not in replay mode and actually mutated).
   if (!replay_mode && result.ok && result.mutated) {
     if (result.propagate_args.empty()) {
-      result.propagate_args = args;  // propagate original args by default
+      result.propagate_args = ToOwnedArgs(args);
     }
     context.server.IncrementDirty();
     if (context.propagate) {
@@ -128,9 +127,38 @@ CommandResult ExecuteCommandDetailed(CommandRegistry& registry,
   return result;
 }
 
+CommandResult ExecuteCommandDetailed(CommandRegistry& registry,
+                                     CommandContext& context,
+                                     const std::vector<std::string>& args,
+                                     bool replay_mode) {
+  auto views = ToArgViews(args);
+  return ExecuteCommandDetailed(registry, context, CommandArgs{views},
+                                replay_mode);
+}
+
+CommandResult ExecuteCommandDetailed(
+    CommandRegistry& registry, CommandContext& context,
+    std::initializer_list<std::string_view> args, bool replay_mode) {
+  std::vector<std::string_view> views(args);
+  return ExecuteCommandDetailed(registry, context, CommandArgs{views},
+                                replay_mode);
+}
+
+std::string ExecuteCommand(CommandRegistry& registry, CommandContext& context,
+                           CommandArgs args) {
+  return ExecuteCommandDetailed(registry, context, args).reply;
+}
+
 std::string ExecuteCommand(CommandRegistry& registry, CommandContext& context,
                            const std::vector<std::string>& args) {
-  return ExecuteCommandDetailed(registry, context, args).reply;
+  auto views = ToArgViews(args);
+  return ExecuteCommand(registry, context, CommandArgs{views});
+}
+
+std::string ExecuteCommand(CommandRegistry& registry, CommandContext& context,
+                           std::initializer_list<std::string_view> args) {
+  std::vector<std::string_view> views(args);
+  return ExecuteCommand(registry, context, CommandArgs{views});
 }
 
 }  // namespace miniredis

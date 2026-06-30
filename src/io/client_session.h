@@ -70,21 +70,21 @@ inline exec::task<void> handle_client(
       }
 
       while (parser.HasCommand()) {
-        std::vector<std::string> args = parser.TakeCommand();
+        RespCommand command = parser.TakeCommand();
 
         std::string reply = co_await stdexec::starts_on(
-            cmd_sched,
-            stdexec::just(std::move(args)) |
-                stdexec::then([&](std::vector<std::string> cmd_args) {
-                  Database* db = server.GetDbFor(*client);
-                  if (db == nullptr) {
-                    return RespReply::Error("ERR invalid DB index");
-                  }
-                  CommandContext ctx{server, *client, *db};
-                  ctx.propagate = propagate;
-                  ctx.apply_config = apply_config;
-                  return ExecuteCommand(registry, ctx, cmd_args);
-                }));
+            cmd_sched, stdexec::just(std::move(command)) |
+                           stdexec::then([&](RespCommand cmd_args) {
+                             Database* db = server.GetDbFor(*client);
+                             if (db == nullptr) {
+                               return RespReply::Error("ERR invalid DB index");
+                             }
+                             CommandContext ctx{server, *client, *db};
+                             ctx.propagate = propagate;
+                             ctx.apply_config = apply_config;
+                             return ExecuteCommand(registry, ctx,
+                                                   cmd_args.Args());
+                           }));
         // Transfer back to the IO thread before touching parser/reply_buf.
         co_await io_sched.schedule();
         reply_buf += reply;

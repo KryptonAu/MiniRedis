@@ -2,8 +2,42 @@
 
 #include <cctype>
 #include <cstdlib>
+#include <utility>
 
 namespace miniredis {
+
+// ===== RespCommand =====
+
+RespCommand::RespCommand() = default;
+
+RespCommand::RespCommand(std::shared_ptr<const std::string> storage,
+                         std::vector<ArgSpan> spans)
+    : storage_(std::move(storage)) {
+  args_.reserve(spans.size());
+  const char* base = storage_->data();
+  for (const auto& span : spans) {
+    args_.emplace_back(base + span.offset, span.length);
+  }
+}
+
+std::span<const std::string_view> RespCommand::Args() const { return args_; }
+
+size_t RespCommand::size() const { return args_.size(); }
+
+bool RespCommand::empty() const { return args_.empty(); }
+
+std::string_view RespCommand::operator[](size_t index) const {
+  return args_[index];
+}
+
+std::vector<std::string> RespCommand::ToOwnedVector() const {
+  std::vector<std::string> result;
+  result.reserve(args_.size());
+  for (std::string_view arg : args_) {
+    result.emplace_back(arg);
+  }
+  return result;
+}
 
 // ===== RespParser =====
 
@@ -12,20 +46,26 @@ RespParser::RespParser() = default;
 ParseStatus RespParser::Feed(std::string_view data) {
   if (!error_.empty()) return ParseStatus::kError;
 
-  buffer_.insert(buffer_.end(), data.begin(), data.end());
+  buffer_.append(data);
   size_t pos = 0;
+  size_t last_complete_pos = 0;
   bool any_complete = false;
+  std::vector<ParsedCommand> parsed_commands;
 
   while (pos < buffer_.size()) {
-    auto status = ParseOneAt(pos);
-    if (status == ParseStatus::kError) return ParseStatus::kError;
+    ParsedCommand command;
+    auto status = ParseOneAt(pos, command);
+    if (status == ParseStatus::kError) {
+      CommitParsedCommands(std::move(parsed_commands), last_complete_pos);
+      return ParseStatus::kError;
+    }
     if (status == ParseStatus::kIncomplete) break;
+    last_complete_pos = pos;
+    parsed_commands.push_back(std::move(command));
     any_complete = true;
   }
 
-  // Remove consumed bytes
-  if (pos > 0)
-    buffer_.erase(buffer_.begin(), buffer_.begin() + static_cast<long>(pos));
+  CommitParsedCommands(std::move(parsed_commands), last_complete_pos);
 
   return any_complete ? ParseStatus::kComplete : ParseStatus::kIncomplete;
 }
@@ -36,7 +76,7 @@ size_t RespParser::PendingCommandCount() const {
   return ready_commands_.size();
 }
 
-std::vector<std::string> RespParser::TakeCommand() {
+RespCommand RespParser::TakeCommand() {
   if (ready_commands_.empty()) return {};
   auto cmd = std::move(ready_commands_.front());
   ready_commands_.pop_front();
@@ -56,14 +96,15 @@ std::optional<std::string_view> RespParser::LastError() const {
 
 size_t RespParser::BufferSize() const { return buffer_.size(); }
 
-ParseStatus RespParser::ParseOneAt(size_t& pos) {
+ParseStatus RespParser::ParseOneAt(size_t& pos, ParsedCommand& command) {
   size_t start = pos;
   if (pos >= buffer_.size()) {
     pos = start;
     return ParseStatus::kIncomplete;
   }
   if (buffer_[pos] != '*') {
-    error_ = "Expected '*' for array, got " + std::to_string(buffer_[pos]);
+    error_ = "Expected '*' for array, got " +
+             std::to_string(static_cast<unsigned char>(buffer_[pos]));
     return ParseStatus::kError;
   }
   pos++;
@@ -94,8 +135,8 @@ ParseStatus RespParser::ParseOneAt(size_t& pos) {
     }
     pos++;
   }
-  if (pos >= buffer_.size() + 1 || pos + 1 >= buffer_.size() ||
-      buffer_[pos] != '\r' || buffer_[pos + 1] != '\n') {
+  if (pos + 1 >= buffer_.size() || buffer_[pos] != '\r' ||
+      buffer_[pos + 1] != '\n') {
     pos = start;
     return ParseStatus::kIncomplete;
   }
@@ -111,7 +152,7 @@ ParseStatus RespParser::ParseOneAt(size_t& pos) {
   }
 
   // Parse array elements
-  std::vector<std::string> args;
+  command.args.reserve(static_cast<size_t>(array_len));
   for (int64_t i = 0; i < array_len; i++) {
     if (pos >= buffer_.size()) {
       pos = start;
@@ -168,8 +209,8 @@ ParseStatus RespParser::ParseOneAt(size_t& pos) {
       pos = start;
       return ParseStatus::kIncomplete;
     }
-    args.emplace_back(reinterpret_cast<const char*>(buffer_.data() + pos),
-                      static_cast<size_t>(bulk_len));
+    command.args.push_back(
+        {.offset = pos, .length = static_cast<size_t>(bulk_len)});
     pos += static_cast<size_t>(bulk_len);
     if (buffer_[pos] != '\r' || buffer_[pos + 1] != '\n') {
       error_ = "Missing CRLF after bulk data";
@@ -178,8 +219,23 @@ ParseStatus RespParser::ParseOneAt(size_t& pos) {
     pos += 2;
   }
 
-  ready_commands_.push_back(std::move(args));
   return ParseStatus::kComplete;
+}
+
+void RespParser::CommitParsedCommands(std::vector<ParsedCommand> commands,
+                                      size_t consumed) {
+  if (commands.empty()) return;
+
+  auto storage = std::make_shared<const std::string>(std::move(buffer_));
+  for (auto& command : commands) {
+    ready_commands_.push_back(RespCommand(storage, std::move(command.args)));
+  }
+
+  if (consumed < storage->size()) {
+    buffer_.assign(storage->data() + consumed, storage->size() - consumed);
+  } else {
+    buffer_.clear();
+  }
 }
 
 // ===== RespReply =====

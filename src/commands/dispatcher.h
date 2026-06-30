@@ -1,7 +1,11 @@
 #pragma once
 
+#include <initializer_list>
 #include <string>
+#include <string_view>
 #include <vector>
+
+#include "commands/command_args.h"
 
 namespace miniredis {
 
@@ -18,11 +22,21 @@ struct CommandResult {
 };
 
 CommandResult ExecuteCommandDetailed(CommandRegistry& registry,
+                                     CommandContext& context, CommandArgs args,
+                                     bool replay_mode = false);
+CommandResult ExecuteCommandDetailed(CommandRegistry& registry,
                                      CommandContext& context,
                                      const std::vector<std::string>& args,
                                      bool replay_mode = false);
+CommandResult ExecuteCommandDetailed(
+    CommandRegistry& registry, CommandContext& context,
+    std::initializer_list<std::string_view> args, bool replay_mode = false);
 
 std::string ExecuteCommand(CommandRegistry& registry, CommandContext& context,
+                           CommandArgs args);
+std::string ExecuteCommand(CommandRegistry& registry, CommandContext& context,
                            const std::vector<std::string>& args);
+std::string ExecuteCommand(CommandRegistry& registry, CommandContext& context,
+                           std::initializer_list<std::string_view> args);
 
 }  // namespace miniredis
