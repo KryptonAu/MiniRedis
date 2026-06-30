@@ -143,6 +143,24 @@ TEST(DictTest, DeleteTriggersShrink) {
   }
 }
 
+TEST(DictTest, SetAfterDeletingAllExpandedEntriesKeepsBucketsValid) {
+  Dict<int, std::string> d;
+  for (int i = 0; i < 100; i++) {
+    ASSERT_TRUE(d.Set(i, "val"));
+  }
+  ASSERT_GT(d.Buckets(), 4);
+
+  for (int i = 0; i < 100; i++) {
+    ASSERT_TRUE(d.Delete(i));
+  }
+  ASSERT_EQ(d.Size(), 0);
+
+  EXPECT_TRUE(d.Set(200, "new"));
+  EXPECT_EQ(d.Size(), 1);
+  ASSERT_NE(d.Find(200), nullptr);
+  EXPECT_EQ(*d.Find(200), "new");
+}
+
 TEST(DictTest, RandomKeyEmpty) {
   Dict<int, std::string> d;
   EXPECT_EQ(d.RandomKey(), std::nullopt);

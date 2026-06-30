@@ -244,7 +244,7 @@ template <typename Key, typename Value, typename Hash, typename KeyEqual>
 bool Dict<Key, Value, Hash, KeyEqual>::Resize(size_t new_size) {
   if (IsRehashing() || ht_[0].used > new_size) return false;
 
-  size_t real_size = NextPower(new_size);
+  size_t real_size = NextPower(new_size == 0 ? kInitialSize : new_size);
   if (real_size == ht_[0].size) return false;
 
   ht_[1].size = real_size;
