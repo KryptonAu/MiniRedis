@@ -72,6 +72,14 @@ class RespParser {
 
 class RespReply {
  public:
+  static void AppendSimpleString(std::string& out, std::string_view msg);
+  static void AppendError(std::string& out, std::string_view msg);
+  static void AppendInteger(std::string& out, int64_t n);
+  static void AppendBulkString(std::string& out, std::string_view data);
+  static void AppendNullBulkString(std::string& out);
+  static void AppendArrayHeader(std::string& out, size_t count);
+  static void AppendEncoded(std::string& out, std::string_view encoded);
+
   static std::string SimpleString(std::string_view msg);
   static std::string Error(std::string_view msg);
   static std::string Integer(int64_t n);
@@ -79,6 +87,8 @@ class RespReply {
   static std::string NullBulkString();
   static std::string ArrayOfBulkStrings(
       const std::vector<std::string>& elements);
+  static std::string ArrayOfBulkStringViews(
+      std::span<const std::string_view> elements);
   static std::string ArrayOfEncoded(
       const std::vector<std::string>& encoded_elements);
   static std::string EmptyArray();

@@ -81,6 +81,16 @@ TEST(StringCommandsTest, MSetRejectsOddArgumentCount) {
   EXPECT_EQ(h.Call(reg, {"GET", "a"}), "$-1\r\n");
 }
 
+TEST(StringCommandsTest, MGetReturnsBulkAndNullElements) {
+  auto reg = CreateDefaultCommandRegistry();
+  CommandTestHarness h;
+
+  EXPECT_EQ(h.Call(reg, {"SET", "a", "one"}), "+OK\r\n");
+  EXPECT_EQ(h.Call(reg, {"SET", "c", "three"}), "+OK\r\n");
+  EXPECT_EQ(h.Call(reg, {"MGET", "a", "b", "c"}),
+            "*3\r\n$3\r\none\r\n$-1\r\n$5\r\nthree\r\n");
+}
+
 TEST(StringCommandsTest, SetRangeUsesOffsetForNewKey) {
   auto reg = CreateDefaultCommandRegistry();
   CommandTestHarness h;

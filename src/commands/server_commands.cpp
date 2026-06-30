@@ -51,9 +51,11 @@ static std::string TimeCmd(CommandContext&, CommandArgs) {
   int64_t us =
       std::chrono::duration_cast<std::chrono::microseconds>(now).count() %
       1000000;
-  std::vector<std::string> v = {RespReply::BulkString(std::to_string(sec)),
-                                RespReply::BulkString(std::to_string(us))};
-  return RespReply::ArrayOfEncoded(v);
+  std::string result;
+  RespReply::AppendArrayHeader(result, 2);
+  RespReply::AppendBulkString(result, std::to_string(sec));
+  RespReply::AppendBulkString(result, std::to_string(us));
+  return result;
 }
 
 static std::string CommandCmd(CommandContext&, CommandArgs args) {

@@ -1,10 +1,46 @@
 #include "core/resp_protocol.h"
 
 #include <cctype>
+#include <charconv>
 #include <cstdlib>
 #include <utility>
 
 namespace miniredis {
+
+namespace {
+
+size_t DecimalDigits(size_t value) {
+  size_t digits = 1;
+  while (value >= 10) {
+    value /= 10;
+    digits++;
+  }
+  return digits;
+}
+
+size_t BulkStringEncodedSize(size_t data_size) {
+  return 1 + DecimalDigits(data_size) + 2 + data_size + 2;
+}
+
+size_t ArrayHeaderEncodedSize(size_t count) {
+  return 1 + DecimalDigits(count) + 2;
+}
+
+void AppendSize(std::string& out, size_t value) {
+  char buf[32];
+  auto [ptr, ec] = std::to_chars(buf, buf + sizeof(buf), value);
+  (void)ec;
+  out.append(buf, ptr);
+}
+
+void AppendInt64(std::string& out, int64_t value) {
+  char buf[32];
+  auto [ptr, ec] = std::to_chars(buf, buf + sizeof(buf), value);
+  (void)ec;
+  out.append(buf, ptr);
+}
+
+}  // namespace
 
 // ===== RespCommand =====
 
@@ -240,36 +276,69 @@ void RespParser::CommitParsedCommands(std::vector<ParsedCommand> commands,
 
 // ===== RespReply =====
 
+void RespReply::AppendSimpleString(std::string& out, std::string_view msg) {
+  out += '+';
+  out.append(msg);
+  out += "\r\n";
+}
+
+void RespReply::AppendError(std::string& out, std::string_view msg) {
+  out += '-';
+  out.append(msg);
+  out += "\r\n";
+}
+
+void RespReply::AppendInteger(std::string& out, int64_t n) {
+  out += ':';
+  AppendInt64(out, n);
+  out += "\r\n";
+}
+
+void RespReply::AppendBulkString(std::string& out, std::string_view data) {
+  out += '$';
+  AppendSize(out, data.size());
+  out += "\r\n";
+  out.append(data);
+  out += "\r\n";
+}
+
+void RespReply::AppendNullBulkString(std::string& out) { out += "$-1\r\n"; }
+
+void RespReply::AppendArrayHeader(std::string& out, size_t count) {
+  out += '*';
+  AppendSize(out, count);
+  out += "\r\n";
+}
+
+void RespReply::AppendEncoded(std::string& out, std::string_view encoded) {
+  out.append(encoded);
+}
+
 std::string RespReply::SimpleString(std::string_view msg) {
   std::string result;
   result.reserve(3 + msg.size());
-  result += '+';
-  result.append(msg);
-  result += "\r\n";
+  AppendSimpleString(result, msg);
   return result;
 }
 
 std::string RespReply::Error(std::string_view msg) {
   std::string result;
   result.reserve(3 + msg.size());
-  result += '-';
-  result.append(msg);
-  result += "\r\n";
+  AppendError(result, msg);
   return result;
 }
 
 std::string RespReply::Integer(int64_t n) {
-  return ":" + std::to_string(n) + "\r\n";
+  std::string result;
+  result.reserve(24);
+  AppendInteger(result, n);
+  return result;
 }
 
 std::string RespReply::BulkString(std::string_view data) {
   std::string result;
-  result.reserve(5 + std::to_string(data.size()).size() + data.size());
-  result += '$';
-  result += std::to_string(data.size());
-  result += "\r\n";
-  result.append(data);
-  result += "\r\n";
+  result.reserve(BulkStringEncodedSize(data.size()));
+  AppendBulkString(result, data);
   return result;
 }
 
@@ -278,11 +347,29 @@ std::string RespReply::NullBulkString() { return "$-1\r\n"; }
 std::string RespReply::ArrayOfBulkStrings(
     const std::vector<std::string>& elements) {
   std::string result;
-  result += '*';
-  result += std::to_string(elements.size());
-  result += "\r\n";
+  size_t total_size = ArrayHeaderEncodedSize(elements.size());
   for (const auto& e : elements) {
-    result += BulkString(e);
+    total_size += BulkStringEncodedSize(e.size());
+  }
+  result.reserve(total_size);
+  AppendArrayHeader(result, elements.size());
+  for (const auto& e : elements) {
+    AppendBulkString(result, e);
+  }
+  return result;
+}
+
+std::string RespReply::ArrayOfBulkStringViews(
+    std::span<const std::string_view> elements) {
+  std::string result;
+  size_t total_size = ArrayHeaderEncodedSize(elements.size());
+  for (std::string_view e : elements) {
+    total_size += BulkStringEncodedSize(e.size());
+  }
+  result.reserve(total_size);
+  AppendArrayHeader(result, elements.size());
+  for (std::string_view e : elements) {
+    AppendBulkString(result, e);
   }
   return result;
 }
@@ -290,23 +377,26 @@ std::string RespReply::ArrayOfBulkStrings(
 std::string RespReply::ArrayOfEncoded(
     const std::vector<std::string>& encoded_elements) {
   std::string result;
-  result += '*';
-  result += std::to_string(encoded_elements.size());
-  result += "\r\n";
+  size_t total_size = ArrayHeaderEncodedSize(encoded_elements.size());
   for (const auto& e : encoded_elements) {
-    result += e;
+    total_size += e.size();
+  }
+  result.reserve(total_size);
+  AppendArrayHeader(result, encoded_elements.size());
+  for (const auto& e : encoded_elements) {
+    AppendEncoded(result, e);
   }
   return result;
 }
 
 std::string RespReply::EmptyArray() { return "*0\r\n"; }
 
-std::string RespReply::Ok() { return SimpleString("OK"); }
+std::string RespReply::Ok() { return "+OK\r\n"; }
 
 std::string RespReply::Nil() { return NullBulkString(); }
 
 std::string RespReply::WrongType() {
-  return Error(
+  return RespReply::Error(
       "WRONGTYPE Operation against a key holding the wrong kind of value");
 }
 

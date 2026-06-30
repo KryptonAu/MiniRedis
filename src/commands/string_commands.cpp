@@ -241,17 +241,18 @@ static std::string IncrByFloatCmd(CommandContext& ctx, CommandArgs args) {
 }
 
 static std::string MGetCmd(CommandContext& ctx, CommandArgs args) {
-  std::vector<std::string> result;
+  std::string result;
+  RespReply::AppendArrayHeader(result, args.size() - 1);
   for (size_t i = 1; i < args.size(); i++) {
     auto* val = ctx.db.Find(args[i]);
     if (!val || !std::holds_alternative<StringValue>(*val)) {
-      result.push_back(RespReply::NullBulkString());
+      RespReply::AppendNullBulkString(result);
     } else {
-      result.push_back(
-          RespReply::BulkString(std::get<StringValue>(*val).ToString()));
+      RespReply::AppendBulkString(result,
+                                  std::get<StringValue>(*val).ToString());
     }
   }
-  return RespReply::ArrayOfEncoded(result);
+  return result;
 }
 
 static std::string MSetCmd(CommandContext& ctx, CommandArgs args) {

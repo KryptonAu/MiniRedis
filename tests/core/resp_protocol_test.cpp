@@ -2,7 +2,9 @@
 
 #include <gtest/gtest.h>
 
+#include <limits>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace miniredis {
@@ -165,8 +167,13 @@ TEST(RespReplyTest, Error) {
 }
 
 TEST(RespReplyTest, Integer) {
+  EXPECT_EQ(RespReply::Integer(0), ":0\r\n");
   EXPECT_EQ(RespReply::Integer(42), ":42\r\n");
   EXPECT_EQ(RespReply::Integer(-1), ":-1\r\n");
+  EXPECT_EQ(RespReply::Integer(std::numeric_limits<int64_t>::min()),
+            ":-9223372036854775808\r\n");
+  EXPECT_EQ(RespReply::Integer(std::numeric_limits<int64_t>::max()),
+            ":9223372036854775807\r\n");
 }
 
 TEST(RespReplyTest, BulkString) {
@@ -184,6 +191,67 @@ TEST(RespReplyTest, EmptyArray) {
 TEST(RespReplyTest, ArrayOfBulkStrings) {
   std::vector<std::string> v = {"a", "bb"};
   EXPECT_EQ(RespReply::ArrayOfBulkStrings(v), "*2\r\n$1\r\na\r\n$2\r\nbb\r\n");
+}
+
+TEST(RespReplyTest, AppendHelpersMatchStringFactories) {
+  std::string out;
+  RespReply::AppendSimpleString(out, "OK");
+  EXPECT_EQ(out, RespReply::SimpleString("OK"));
+
+  out.clear();
+  RespReply::AppendError(out, "ERR msg");
+  EXPECT_EQ(out, RespReply::Error("ERR msg"));
+
+  out.clear();
+  RespReply::AppendInteger(out, -42);
+  EXPECT_EQ(out, RespReply::Integer(-42));
+
+  out.clear();
+  RespReply::AppendBulkString(out, "hello");
+  EXPECT_EQ(out, RespReply::BulkString("hello"));
+
+  out.clear();
+  RespReply::AppendNullBulkString(out);
+  EXPECT_EQ(out, RespReply::NullBulkString());
+}
+
+TEST(RespReplyTest, AppendArrayHeaderAndEncoded) {
+  std::string out;
+  RespReply::AppendArrayHeader(out, 2);
+  RespReply::AppendEncoded(out, RespReply::BulkString("a"));
+  RespReply::AppendEncoded(out, RespReply::Integer(1));
+  EXPECT_EQ(out, "*2\r\n$1\r\na\r\n:1\r\n");
+}
+
+TEST(RespReplyTest, BulkStringLargePayload) {
+  std::string data(64 * 1024, 'x');
+  std::string encoded = RespReply::BulkString(data);
+  EXPECT_TRUE(encoded.starts_with("$65536\r\n"));
+  EXPECT_TRUE(encoded.ends_with("\r\n"));
+  EXPECT_EQ(encoded.size(), std::string("$65536\r\n").size() + data.size() + 2);
+}
+
+TEST(RespReplyTest, ArrayOfBulkStringViewsMatchesOwnedArray) {
+  std::vector<std::string> owned;
+  std::vector<std::string_view> views;
+  owned.reserve(1000);
+  views.reserve(1000);
+  for (int i = 0; i < 1000; i++) {
+    owned.push_back("value-" + std::to_string(i));
+    views.push_back(owned.back());
+  }
+
+  EXPECT_EQ(RespReply::ArrayOfBulkStringViews(views),
+            RespReply::ArrayOfBulkStrings(owned));
+}
+
+TEST(RespReplyTest, EncodedArraysSupportEmptyAndNestedValues) {
+  EXPECT_EQ(RespReply::ArrayOfEncoded({}), "*0\r\n");
+
+  std::vector<std::string> nested = {RespReply::BulkString("cursor"),
+                                     RespReply::ArrayOfBulkStrings({"a"})};
+  EXPECT_EQ(RespReply::ArrayOfEncoded(nested),
+            "*2\r\n$6\r\ncursor\r\n*1\r\n$1\r\na\r\n");
 }
 
 // ===== Reply: convenience =====

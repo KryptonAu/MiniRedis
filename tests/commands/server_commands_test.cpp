@@ -39,6 +39,17 @@ TEST(ServerCommandsTest, DbSizeAndFlush) {
   EXPECT_EQ(h.Call(reg, {"FLUSHDB"}), "+OK\r\n");
 }
 
+TEST(ServerCommandsTest, TimeReturnsTwoBulkStrings) {
+  auto reg = CreateDefaultCommandRegistry();
+  CommandTestHarness h;
+
+  auto reply = h.Call(reg, {"TIME"});
+  auto parts = ParseBulkArray(reply);
+  ASSERT_EQ(parts.size(), 2);
+  EXPECT_FALSE(parts[0].empty());
+  EXPECT_FALSE(parts[1].empty());
+}
+
 TEST(ServerCommandsTest, CommandListsRegisteredCommands) {
   auto reg = CreateDefaultCommandRegistry();
   CommandTestHarness h;

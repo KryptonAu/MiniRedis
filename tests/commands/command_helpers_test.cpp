@@ -17,6 +17,12 @@ TEST(CommandHelpersTest, ZSetRangeUsesStableScoreFormatting) {
 
   EXPECT_EQ(ArrayOfZSetRange(values, true),
             "*2\r\n$6\r\nmember\r\n$3\r\n1.0\r\n");
+  EXPECT_EQ(ArrayOfZSetRange(values, false), "*1\r\n$6\r\nmember\r\n");
+}
+
+TEST(CommandHelpersTest, ScanReplyUsesNestedRespArray) {
+  EXPECT_EQ(ScanReply(5, {"a", "bb"}),
+            "*2\r\n$1\r\n5\r\n*2\r\n$1\r\na\r\n$2\r\nbb\r\n");
 }
 
 }  // namespace

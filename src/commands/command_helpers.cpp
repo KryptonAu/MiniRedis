@@ -61,22 +61,28 @@ ZSetValue MakeZSetValue(CommandContext& ctx) {
 
 std::string ArrayOfZSetRange(const std::vector<ZSetValue::RangeResult>& values,
                              bool with_scores) {
-  std::vector<std::string> elements;
+  std::string result;
+  RespReply::AppendArrayHeader(result, values.size() * (with_scores ? 2 : 1));
   for (const auto& r : values) {
-    elements.push_back(RespReply::BulkString(r.element));
-    if (with_scores)
-      elements.push_back(
-          RespReply::BulkString(FormatDoubleForStorage(r.score)));
+    RespReply::AppendBulkString(result, r.element);
+    if (with_scores) {
+      std::string score = FormatDoubleForStorage(r.score);
+      RespReply::AppendBulkString(result, score);
+    }
   }
-  return RespReply::ArrayOfEncoded(elements);
+  return result;
 }
 
 std::string ScanReply(size_t next_cursor,
                       const std::vector<std::string>& elements) {
-  std::vector<std::string> parts;
-  parts.push_back(RespReply::BulkString(std::to_string(next_cursor)));
-  parts.push_back(RespReply::ArrayOfBulkStrings(elements));
-  return RespReply::ArrayOfEncoded(parts);
+  std::string result;
+  RespReply::AppendArrayHeader(result, 2);
+  RespReply::AppendBulkString(result, std::to_string(next_cursor));
+  RespReply::AppendArrayHeader(result, elements.size());
+  for (const auto& element : elements) {
+    RespReply::AppendBulkString(result, element);
+  }
+  return result;
 }
 
 int64_t MsToSec(int64_t ms) { return (ms + 999) / 1000; }
