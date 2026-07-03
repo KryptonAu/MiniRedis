@@ -1,11 +1,16 @@
 #pragma once
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <memory>
 #include <optional>
 #include <random>
+#include <string>
+#include <string_view>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 namespace miniredis {
@@ -23,10 +28,11 @@ struct SkiplistNode {
   std::vector<Level> levels;
 };
 
-template <typename Key, typename Score, typename ScoreCompare = std::less<Score>,
+template <typename Key, typename Score,
+          typename ScoreCompare = std::less<Score>,
           typename KeyCompare = std::less<Key>>
 class Skiplist {
-public:
+ public:
   using Node = SkiplistNode<Key, Score>;
 
   struct RangeSpec {
@@ -46,10 +52,13 @@ public:
   Skiplist& operator=(Skiplist&& other) noexcept;
 
   Node* Insert(Score score, Key key);
+  Node* InsertView(Score score, std::string_view key);
   bool Delete(Score score, const Key& key);
+  bool DeleteView(Score score, std::string_view key);
   bool DeleteNode(Node* node);
 
   std::optional<size_t> GetRank(Score score, const Key& key) const;
+  std::optional<size_t> GetRankView(Score score, std::string_view key) const;
   Node* GetByRank(size_t rank) const;
 
   bool ScoreInRange(const RangeSpec& range) const;
@@ -68,7 +77,7 @@ public:
   template <typename OnDelete>
   size_t DeleteRangeByRank(size_t start, size_t end, OnDelete on_delete);
 
-private:
+ private:
   static constexpr int kMaxLevel = 32;
   static constexpr double kProbability = 0.25;
 
@@ -81,15 +90,29 @@ private:
   KeyCompare key_compare_;
 
   bool CompareLess(Score a, const Key& ka, Score b, const Key& kb) const;
+  template <typename LookupKey, typename KeyLess>
+  bool CompareLessForLookup(Score a, const Key& ka, Score b,
+                            const LookupKey& kb, KeyLess key_less) const;
   bool ScoreLess(Score a, Score b) const;
   bool ScoreEqual(Score a, Score b) const;
   bool ScoreGreater(Score a, Score b) const;
   bool InRange(Score score, const RangeSpec& range) const;
+  template <typename LookupKey, typename KeyLess, typename MakeStoredKey>
+  Node* InsertWithLookup(Score score, const LookupKey& key, KeyLess key_less,
+                         MakeStoredKey make_key);
+  template <typename LookupKey, typename KeyLess, typename KeyEqual>
+  bool DeleteWithLookup(Score score, const LookupKey& key, KeyLess key_less,
+                        KeyEqual key_equal);
+  template <typename LookupKey, typename KeyLess, typename KeyEqual>
+  std::optional<size_t> GetRankWithLookup(Score score, const LookupKey& key,
+                                          KeyLess key_less,
+                                          KeyEqual key_equal) const;
 };
 
 // ===== Implementation =====
 
-template <typename Key, typename Score, typename ScoreCompare, typename KeyCompare>
+template <typename Key, typename Score, typename ScoreCompare,
+          typename KeyCompare>
 Skiplist<Key, Score, ScoreCompare, KeyCompare>::Skiplist() {
   header_ = std::make_unique<Node>();
   header_->levels.resize(kMaxLevel);
@@ -136,44 +159,65 @@ Skiplist<Key, Score, ScoreCompare, KeyCompare>::operator=(
   return *this;
 }
 
-template <typename Key, typename Score, typename ScoreCompare, typename KeyCompare>
+template <typename Key, typename Score, typename ScoreCompare,
+          typename KeyCompare>
 int Skiplist<Key, Score, ScoreCompare, KeyCompare>::RandomLevel() {
   static thread_local std::mt19937 gen(std::random_device{}());
   static thread_local std::uniform_int_distribution<int> dist(0, 0xFFFF);
 
   int level = 1;
-  while (dist(gen) < static_cast<int>(kProbability * 0xFFFF) && level < kMaxLevel) {
+  while (dist(gen) < static_cast<int>(kProbability * 0xFFFF) &&
+         level < kMaxLevel) {
     level++;
   }
   return level;
 }
 
-template <typename Key, typename Score, typename ScoreCompare, typename KeyCompare>
-bool Skiplist<Key, Score, ScoreCompare, KeyCompare>::CompareLess(Score a, const Key& ka, Score b,
-                                                                  const Key& kb) const {
+template <typename Key, typename Score, typename ScoreCompare,
+          typename KeyCompare>
+bool Skiplist<Key, Score, ScoreCompare, KeyCompare>::CompareLess(
+    Score a, const Key& ka, Score b, const Key& kb) const {
   if (score_compare_(a, b)) return true;
   if (score_compare_(b, a)) return false;
   return key_compare_(ka, kb);
 }
 
-template <typename Key, typename Score, typename ScoreCompare, typename KeyCompare>
-bool Skiplist<Key, Score, ScoreCompare, KeyCompare>::ScoreLess(Score a, Score b) const {
+template <typename Key, typename Score, typename ScoreCompare,
+          typename KeyCompare>
+template <typename LookupKey, typename KeyLess>
+bool Skiplist<Key, Score, ScoreCompare, KeyCompare>::CompareLessForLookup(
+    Score a, const Key& ka, Score b, const LookupKey& kb,
+    KeyLess key_less) const {
+  if (score_compare_(a, b)) return true;
+  if (score_compare_(b, a)) return false;
+  return key_less(ka, kb);
+}
+
+template <typename Key, typename Score, typename ScoreCompare,
+          typename KeyCompare>
+bool Skiplist<Key, Score, ScoreCompare, KeyCompare>::ScoreLess(Score a,
+                                                               Score b) const {
   return score_compare_(a, b);
 }
 
-template <typename Key, typename Score, typename ScoreCompare, typename KeyCompare>
-bool Skiplist<Key, Score, ScoreCompare, KeyCompare>::ScoreEqual(Score a, Score b) const {
+template <typename Key, typename Score, typename ScoreCompare,
+          typename KeyCompare>
+bool Skiplist<Key, Score, ScoreCompare, KeyCompare>::ScoreEqual(Score a,
+                                                                Score b) const {
   return !score_compare_(a, b) && !score_compare_(b, a);
 }
 
-template <typename Key, typename Score, typename ScoreCompare, typename KeyCompare>
-bool Skiplist<Key, Score, ScoreCompare, KeyCompare>::ScoreGreater(Score a, Score b) const {
+template <typename Key, typename Score, typename ScoreCompare,
+          typename KeyCompare>
+bool Skiplist<Key, Score, ScoreCompare, KeyCompare>::ScoreGreater(
+    Score a, Score b) const {
   return score_compare_(b, a);
 }
 
-template <typename Key, typename Score, typename ScoreCompare, typename KeyCompare>
-bool Skiplist<Key, Score, ScoreCompare, KeyCompare>::InRange(Score score,
-                                                              const RangeSpec& range) const {
+template <typename Key, typename Score, typename ScoreCompare,
+          typename KeyCompare>
+bool Skiplist<Key, Score, ScoreCompare, KeyCompare>::InRange(
+    Score score, const RangeSpec& range) const {
   if (range.min_exclusive) {
     if (!ScoreGreater(score, range.min)) return false;
   } else {
@@ -187,9 +231,38 @@ bool Skiplist<Key, Score, ScoreCompare, KeyCompare>::InRange(Score score,
   return true;
 }
 
-template <typename Key, typename Score, typename ScoreCompare, typename KeyCompare>
+template <typename Key, typename Score, typename ScoreCompare,
+          typename KeyCompare>
 typename Skiplist<Key, Score, ScoreCompare, KeyCompare>::Node*
 Skiplist<Key, Score, ScoreCompare, KeyCompare>::Insert(Score score, Key key) {
+  auto key_less = [this](const Key& stored, const Key& lookup) {
+    return key_compare_(stored, lookup);
+  };
+  return InsertWithLookup(score, key, key_less,
+                          [&key]() { return std::move(key); });
+}
+
+template <typename Key, typename Score, typename ScoreCompare,
+          typename KeyCompare>
+typename Skiplist<Key, Score, ScoreCompare, KeyCompare>::Node*
+Skiplist<Key, Score, ScoreCompare, KeyCompare>::InsertView(
+    Score score, std::string_view key) {
+  static_assert(std::is_same_v<Key, std::string>,
+                "string_view lookup is only available for string keys");
+  auto key_less = [](const Key& stored, std::string_view lookup) {
+    return std::string_view(stored) < lookup;
+  };
+  return InsertWithLookup(score, key, key_less,
+                          [key]() { return std::string(key); });
+}
+
+template <typename Key, typename Score, typename ScoreCompare,
+          typename KeyCompare>
+template <typename LookupKey, typename KeyLess, typename MakeStoredKey>
+typename Skiplist<Key, Score, ScoreCompare, KeyCompare>::Node*
+Skiplist<Key, Score, ScoreCompare, KeyCompare>::InsertWithLookup(
+    Score score, const LookupKey& key, KeyLess key_less,
+    MakeStoredKey make_key) {
   Node* update[kMaxLevel];
   size_t rank[kMaxLevel];
 
@@ -197,7 +270,9 @@ Skiplist<Key, Score, ScoreCompare, KeyCompare>::Insert(Score score, Key key) {
   for (int i = max_level_ - 1; i >= 0; i--) {
     rank[i] = (i == max_level_ - 1) ? 0 : rank[i + 1];
     while (x->levels[i].forward &&
-           CompareLess(x->levels[i].forward->score, x->levels[i].forward->key, score, key)) {
+           CompareLessForLookup(x->levels[i].forward->score,
+                                x->levels[i].forward->key, score, key,
+                                key_less)) {
       rank[i] += x->levels[i].span;
       x = x->levels[i].forward;
     }
@@ -215,7 +290,7 @@ Skiplist<Key, Score, ScoreCompare, KeyCompare>::Insert(Score score, Key key) {
   }
 
   auto new_node = std::make_unique<Node>();
-  new_node->key = std::move(key);
+  new_node->key = make_key();
   new_node->score = score;
   new_node->levels.resize(level);
   Node* raw = new_node.get();
@@ -245,28 +320,60 @@ Skiplist<Key, Score, ScoreCompare, KeyCompare>::Insert(Score score, Key key) {
   return raw;
 }
 
-template <typename Key, typename Score, typename ScoreCompare, typename KeyCompare>
-bool Skiplist<Key, Score, ScoreCompare, KeyCompare>::Delete(Score score, const Key& key) {
-  Node* update[kMaxLevel];
+template <typename Key, typename Score, typename ScoreCompare,
+          typename KeyCompare>
+bool Skiplist<Key, Score, ScoreCompare, KeyCompare>::Delete(Score score,
+                                                            const Key& key) {
+  auto key_less = [this](const Key& stored, const Key& lookup) {
+    return key_compare_(stored, lookup);
+  };
+  auto key_equal = [](const Key& stored, const Key& lookup) {
+    return stored == lookup;
+  };
+  return DeleteWithLookup(score, key, key_less, key_equal);
+}
+
+template <typename Key, typename Score, typename ScoreCompare,
+          typename KeyCompare>
+bool Skiplist<Key, Score, ScoreCompare, KeyCompare>::DeleteView(
+    Score score, std::string_view key) {
+  static_assert(std::is_same_v<Key, std::string>,
+                "string_view lookup is only available for string keys");
+  auto key_less = [](const Key& stored, std::string_view lookup) {
+    return std::string_view(stored) < lookup;
+  };
+  auto key_equal = [](const Key& stored, std::string_view lookup) {
+    return std::string_view(stored) == lookup;
+  };
+  return DeleteWithLookup(score, key, key_less, key_equal);
+}
+
+template <typename Key, typename Score, typename ScoreCompare,
+          typename KeyCompare>
+template <typename LookupKey, typename KeyLess, typename KeyEqual>
+bool Skiplist<Key, Score, ScoreCompare, KeyCompare>::DeleteWithLookup(
+    Score score, const LookupKey& key, KeyLess key_less, KeyEqual key_equal) {
   Node* x = header_.get();
 
   for (int i = max_level_ - 1; i >= 0; i--) {
     while (x->levels[i].forward &&
-           CompareLess(x->levels[i].forward->score, x->levels[i].forward->key, score, key)) {
+           CompareLessForLookup(x->levels[i].forward->score,
+                                x->levels[i].forward->key, score, key,
+                                key_less)) {
       x = x->levels[i].forward;
     }
-    update[i] = x;
   }
 
   x = x->levels[0].forward;
-  if (x && ScoreEqual(x->score, score) && x->key == key) {
+  if (x && ScoreEqual(x->score, score) && key_equal(x->key, key)) {
     DeleteNode(x);
     return true;
   }
   return false;
 }
 
-template <typename Key, typename Score, typename ScoreCompare, typename KeyCompare>
+template <typename Key, typename Score, typename ScoreCompare,
+          typename KeyCompare>
 bool Skiplist<Key, Score, ScoreCompare, KeyCompare>::DeleteNode(Node* node) {
   if (!node) return false;
 
@@ -275,8 +382,8 @@ bool Skiplist<Key, Score, ScoreCompare, KeyCompare>::DeleteNode(Node* node) {
 
   for (int i = max_level_ - 1; i >= 0; i--) {
     while (x->levels[i].forward &&
-           CompareLess(x->levels[i].forward->score, x->levels[i].forward->key, node->score,
-                       node->key)) {
+           CompareLess(x->levels[i].forward->score, x->levels[i].forward->key,
+                       node->score, node->key)) {
       x = x->levels[i].forward;
     }
     update[i] = x;
@@ -310,8 +417,9 @@ bool Skiplist<Key, Score, ScoreCompare, KeyCompare>::DeleteNode(Node* node) {
   }
 
   // Remove node from nodes_ (erase by raw pointer)
-  auto it = std::find_if(nodes_.begin(), nodes_.end(),
-                         [node](const std::unique_ptr<Node>& p) { return p.get() == node; });
+  auto it = std::find_if(
+      nodes_.begin(), nodes_.end(),
+      [node](const std::unique_ptr<Node>& p) { return p.get() == node; });
   if (it != nodes_.end()) {
     nodes_.erase(it);
   }
@@ -320,28 +428,64 @@ bool Skiplist<Key, Score, ScoreCompare, KeyCompare>::DeleteNode(Node* node) {
   return true;
 }
 
-template <typename Key, typename Score, typename ScoreCompare, typename KeyCompare>
+template <typename Key, typename Score, typename ScoreCompare,
+          typename KeyCompare>
 std::optional<size_t> Skiplist<Key, Score, ScoreCompare, KeyCompare>::GetRank(
     Score score, const Key& key) const {
+  auto key_less = [this](const Key& stored, const Key& lookup) {
+    return key_compare_(stored, lookup);
+  };
+  auto key_equal = [](const Key& stored, const Key& lookup) {
+    return stored == lookup;
+  };
+  return GetRankWithLookup(score, key, key_less, key_equal);
+}
+
+template <typename Key, typename Score, typename ScoreCompare,
+          typename KeyCompare>
+std::optional<size_t>
+Skiplist<Key, Score, ScoreCompare, KeyCompare>::GetRankView(
+    Score score, std::string_view key) const {
+  static_assert(std::is_same_v<Key, std::string>,
+                "string_view lookup is only available for string keys");
+  auto key_less = [](const Key& stored, std::string_view lookup) {
+    return std::string_view(stored) < lookup;
+  };
+  auto key_equal = [](const Key& stored, std::string_view lookup) {
+    return std::string_view(stored) == lookup;
+  };
+  return GetRankWithLookup(score, key, key_less, key_equal);
+}
+
+template <typename Key, typename Score, typename ScoreCompare,
+          typename KeyCompare>
+template <typename LookupKey, typename KeyLess, typename KeyEqual>
+std::optional<size_t>
+Skiplist<Key, Score, ScoreCompare, KeyCompare>::GetRankWithLookup(
+    Score score, const LookupKey& key, KeyLess key_less,
+    KeyEqual key_equal) const {
   size_t rank = 0;
   Node* x = header_.get();
 
   for (int i = max_level_ - 1; i >= 0; i--) {
     while (x->levels[i].forward &&
-           CompareLess(x->levels[i].forward->score, x->levels[i].forward->key, score, key)) {
+           CompareLessForLookup(x->levels[i].forward->score,
+                                x->levels[i].forward->key, score, key,
+                                key_less)) {
       rank += x->levels[i].span;
       x = x->levels[i].forward;
     }
   }
 
   x = x->levels[0].forward;
-  if (x && ScoreEqual(x->score, score) && x->key == key) {
+  if (x && ScoreEqual(x->score, score) && key_equal(x->key, key)) {
     return rank + 1;  // 1-based rank
   }
   return std::nullopt;
 }
 
-template <typename Key, typename Score, typename ScoreCompare, typename KeyCompare>
+template <typename Key, typename Score, typename ScoreCompare,
+          typename KeyCompare>
 typename Skiplist<Key, Score, ScoreCompare, KeyCompare>::Node*
 Skiplist<Key, Score, ScoreCompare, KeyCompare>::GetByRank(size_t rank) const {
   if (rank == 0 || rank > size_) return nullptr;
@@ -359,15 +503,19 @@ Skiplist<Key, Score, ScoreCompare, KeyCompare>::GetByRank(size_t rank) const {
   return nullptr;
 }
 
-template <typename Key, typename Score, typename ScoreCompare, typename KeyCompare>
-bool Skiplist<Key, Score, ScoreCompare, KeyCompare>::ScoreInRange(const RangeSpec& range) const {
+template <typename Key, typename Score, typename ScoreCompare,
+          typename KeyCompare>
+bool Skiplist<Key, Score, ScoreCompare, KeyCompare>::ScoreInRange(
+    const RangeSpec& range) const {
   if (size_ == 0) return false;
   Node* first = First();
   Node* last = tail_;
   if (!first || !last) return false;
 
-  Score max_first = ScoreLess(first->score, last->score) ? last->score : first->score;
-  Score min_last = ScoreLess(first->score, last->score) ? first->score : last->score;
+  Score max_first =
+      ScoreLess(first->score, last->score) ? last->score : first->score;
+  Score min_last =
+      ScoreLess(first->score, last->score) ? first->score : last->score;
 
   Score range_max = range.max;
   Score range_min = range.min;
@@ -385,16 +533,19 @@ bool Skiplist<Key, Score, ScoreCompare, KeyCompare>::ScoreInRange(const RangeSpe
   return true;
 }
 
-template <typename Key, typename Score, typename ScoreCompare, typename KeyCompare>
+template <typename Key, typename Score, typename ScoreCompare,
+          typename KeyCompare>
 typename Skiplist<Key, Score, ScoreCompare, KeyCompare>::Node*
-Skiplist<Key, Score, ScoreCompare, KeyCompare>::FirstInRange(const RangeSpec& range) const {
+Skiplist<Key, Score, ScoreCompare, KeyCompare>::FirstInRange(
+    const RangeSpec& range) const {
   if (!ScoreInRange(range)) return nullptr;
 
   Node* x = header_.get();
   for (int i = max_level_ - 1; i >= 0; i--) {
     while (x->levels[i].forward) {
       Score s = x->levels[i].forward->score;
-      if (range.min_exclusive ? ScoreGreater(s, range.min) : !ScoreLess(s, range.min)) {
+      if (range.min_exclusive ? ScoreGreater(s, range.min)
+                              : !ScoreLess(s, range.min)) {
         break;
       }
       x = x->levels[i].forward;
@@ -408,9 +559,11 @@ Skiplist<Key, Score, ScoreCompare, KeyCompare>::FirstInRange(const RangeSpec& ra
   return x;
 }
 
-template <typename Key, typename Score, typename ScoreCompare, typename KeyCompare>
+template <typename Key, typename Score, typename ScoreCompare,
+          typename KeyCompare>
 typename Skiplist<Key, Score, ScoreCompare, KeyCompare>::Node*
-Skiplist<Key, Score, ScoreCompare, KeyCompare>::LastInRange(const RangeSpec& range) const {
+Skiplist<Key, Score, ScoreCompare, KeyCompare>::LastInRange(
+    const RangeSpec& range) const {
   if (!ScoreInRange(range)) return nullptr;
 
   // Go to the first node past the range, then step back
@@ -418,7 +571,8 @@ Skiplist<Key, Score, ScoreCompare, KeyCompare>::LastInRange(const RangeSpec& ran
   for (int i = max_level_ - 1; i >= 0; i--) {
     while (x->levels[i].forward) {
       Score s = x->levels[i].forward->score;
-      if (range.max_exclusive ? !ScoreLess(s, range.max) : ScoreGreater(s, range.max)) {
+      if (range.max_exclusive ? !ScoreLess(s, range.max)
+                              : ScoreGreater(s, range.max)) {
         break;
       }
       x = x->levels[i].forward;
@@ -434,7 +588,8 @@ Skiplist<Key, Score, ScoreCompare, KeyCompare>::LastInRange(const RangeSpec& ran
   return x;
 }
 
-template <typename Key, typename Score, typename ScoreCompare, typename KeyCompare>
+template <typename Key, typename Score, typename ScoreCompare,
+          typename KeyCompare>
 template <typename OnDelete>
 size_t Skiplist<Key, Score, ScoreCompare, KeyCompare>::DeleteRangeByScore(
     const RangeSpec& range, OnDelete on_delete) {
@@ -455,7 +610,8 @@ size_t Skiplist<Key, Score, ScoreCompare, KeyCompare>::DeleteRangeByScore(
   return deleted;
 }
 
-template <typename Key, typename Score, typename ScoreCompare, typename KeyCompare>
+template <typename Key, typename Score, typename ScoreCompare,
+          typename KeyCompare>
 template <typename OnDelete>
 size_t Skiplist<Key, Score, ScoreCompare, KeyCompare>::DeleteRangeByRank(
     size_t start, size_t end, OnDelete on_delete) {

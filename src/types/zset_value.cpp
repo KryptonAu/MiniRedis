@@ -1,12 +1,55 @@
 #include "types/zset_value.h"
 
 #include <algorithm>
+#include <array>
+#include <charconv>
 #include <cmath>
+#include <cstdint>
+#include <system_error>
 
 #include "types/numeric_parse.h"
 #include "types/type_conversion.h"
 
 namespace miniredis {
+namespace {
+
+constexpr size_t kInt64StringMax = 32;
+
+std::string_view ListpackMemberView(
+    const ds::Listpack::Value& value,
+    std::array<char, kInt64StringMax>& scratch) {
+  if (value.type == ds::Listpack::Value::Type::kString) return value.string;
+
+  auto [ptr, ec] = std::to_chars(
+      scratch.data(), scratch.data() + scratch.size(), value.integer);
+  if (ec != std::errc()) return {};
+  return std::string_view(scratch.data(),
+                          static_cast<size_t>(ptr - scratch.data()));
+}
+
+bool ListpackMemberEquals(const ds::Listpack::Value& value,
+                          std::string_view lookup) {
+  std::array<char, kInt64StringMax> scratch{};
+  return ListpackMemberView(value, scratch) == lookup;
+}
+
+bool LookupLessThanListpackMember(std::string_view lookup,
+                                  const ds::Listpack::Value& value) {
+  std::array<char, kInt64StringMax> scratch{};
+  return lookup < ListpackMemberView(value, scratch);
+}
+
+bool ListpackMemberInLexRange(const ds::Listpack::Value& value,
+                              std::string_view min, std::string_view max,
+                              bool min_ex, bool max_ex) {
+  std::array<char, kInt64StringMax> scratch{};
+  std::string_view member = ListpackMemberView(value, scratch);
+  if (min_ex ? member <= min : member < min) return false;
+  if (max_ex ? member >= max : member > max) return false;
+  return true;
+}
+
+}  // namespace
 
 ZSetValue::ZSetValue(EncodingThresholds thresholds) : thresholds_(thresholds) {
   encoding_ = ds::Listpack{};
@@ -26,7 +69,7 @@ TypeResult<bool> ZSetValue::Add(std::string_view element, double score) {
       auto score_str = lp->Get(i + 1);
       if (!ele || !score_str) continue;
 
-      if (ele->ToString() == element) {
+      if (ListpackMemberEquals(*ele, element)) {
         // Update existing
         double old_score = 0.0;
         auto parsed = ParseFiniteDouble(score_str->ToString());
@@ -49,8 +92,8 @@ TypeResult<bool> ZSetValue::Add(std::string_view element, double score) {
           double existing = 0.0;
           auto p = ParseFiniteDouble(ss->ToString());
           if (std::holds_alternative<double>(p)) existing = std::get<double>(p);
-          if (score < existing ||
-              (score == existing && element < e->ToString())) {
+          if (score < existing || (score == existing &&
+                                   LookupLessThanListpackMember(element, *e))) {
             insert_idx = j;
             break;
           }
@@ -66,7 +109,8 @@ TypeResult<bool> ZSetValue::Add(std::string_view element, double score) {
           existing_score = std::get<double>(parsed);
         }
         if (score < existing_score ||
-            (score == existing_score && element < ele->ToString())) {
+            (score == existing_score &&
+             LookupLessThanListpackMember(element, *ele))) {
           insert_idx = i;
         }
       }
@@ -87,15 +131,15 @@ TypeResult<bool> ZSetValue::Add(std::string_view element, double score) {
 
   // Skiplist encoding
   auto& zs = std::get<ZSetSkiplist>(encoding_);
-  auto* existing = zs.dict.Find(std::string(element));
+  auto* existing = zs.dict.FindView(element);
   if (existing) {
     auto* node = *existing;
     if (node->score == score) return false;
-    zs.dict.Delete(std::string(element));
+    zs.dict.DeleteView(element);
     zs.skiplist.DeleteNode(node);
   }
-  auto* node = zs.skiplist.Insert(score, std::string(element));
-  zs.dict.Set(std::string(element), node);
+  auto* node = zs.skiplist.InsertView(score, element);
+  zs.dict.SetView(element, node);
   return existing == nullptr;
 }
 
@@ -103,7 +147,7 @@ bool ZSetValue::Remove(std::string_view element) {
   if (auto* lp = std::get_if<ds::Listpack>(&encoding_)) {
     for (size_t i = 0; i < lp->Size(); i += 2) {
       auto ele = lp->Get(i);
-      if (ele && ele->ToString() == element) {
+      if (ele && ListpackMemberEquals(*ele, element)) {
         lp->Delete(i + 1);
         lp->Delete(i);
         return true;
@@ -113,10 +157,10 @@ bool ZSetValue::Remove(std::string_view element) {
   }
 
   auto& zs = std::get<ZSetSkiplist>(encoding_);
-  auto* node_ptr = zs.dict.Find(std::string(element));
+  auto* node_ptr = zs.dict.FindView(element);
   if (!node_ptr) return false;
   auto* node = *node_ptr;
-  zs.dict.Delete(std::string(element));
+  zs.dict.DeleteView(element);
   zs.skiplist.DeleteNode(node);
   return true;
 }
@@ -140,7 +184,7 @@ std::optional<double> ZSetValue::Score(std::string_view element) const {
   if (auto* lp = std::get_if<ds::Listpack>(&encoding_)) {
     for (size_t i = 0; i < lp->Size(); i += 2) {
       auto ele = lp->Get(i);
-      if (ele && ele->ToString() == element) {
+      if (ele && ListpackMemberEquals(*ele, element)) {
         auto score_str = lp->Get(i + 1);
         if (score_str) {
           auto parsed = ParseFiniteDouble(score_str->ToString());
@@ -154,7 +198,7 @@ std::optional<double> ZSetValue::Score(std::string_view element) const {
   }
 
   auto& zs = std::get<ZSetSkiplist>(encoding_);
-  auto* node_ptr = zs.dict.Find(std::string(element));
+  auto* node_ptr = zs.dict.FindView(element);
   if (!node_ptr) return std::nullopt;
   return (*node_ptr)->score;
 }
@@ -163,15 +207,15 @@ std::optional<size_t> ZSetValue::Rank(std::string_view element) const {
   if (auto* lp = std::get_if<ds::Listpack>(&encoding_)) {
     for (size_t i = 0; i < lp->Size(); i += 2) {
       auto ele = lp->Get(i);
-      if (ele && ele->ToString() == element) return i / 2;
+      if (ele && ListpackMemberEquals(*ele, element)) return i / 2;
     }
     return std::nullopt;
   }
 
   auto& zs = std::get<ZSetSkiplist>(encoding_);
-  auto* node_ptr = zs.dict.Find(std::string(element));
+  auto* node_ptr = zs.dict.FindView(element);
   if (!node_ptr) return std::nullopt;
-  auto rank = zs.skiplist.GetRank((*node_ptr)->score, (*node_ptr)->key);
+  auto rank = zs.skiplist.GetRankView((*node_ptr)->score, element);
   if (rank) return *rank - 1;  // 1-based → 0-based
   return std::nullopt;
 }
@@ -221,6 +265,17 @@ size_t ZSetValue::CountByScore(double min, double max, bool min_ex,
 
 size_t ZSetValue::LexCount(std::string_view min, std::string_view max,
                            bool min_ex, bool max_ex) const {
+  if (auto* lp = std::get_if<ds::Listpack>(&encoding_)) {
+    size_t count = 0;
+    for (size_t i = 0; i < lp->Size(); i += 2) {
+      auto ele = lp->Get(i);
+      if (ele && ListpackMemberInLexRange(*ele, min, max, min_ex, max_ex)) {
+        count++;
+      }
+    }
+    return count;
+  }
+
   // ZSet lex operations require all elements to have the same score
   auto all = Range(0, -1);
   size_t count = 0;
@@ -339,6 +394,26 @@ std::vector<ZSetValue::RangeResult> ZSetValue::RangeByLex(
     std::string_view min, std::string_view max, bool min_ex, bool max_ex,
     long long offset, long long count) const {
   std::vector<RangeResult> result;
+  if (auto* lp = std::get_if<ds::Listpack>(&encoding_)) {
+    for (size_t i = 0; i < lp->Size(); i += 2) {
+      auto ele = lp->Get(i);
+      auto score_str = lp->Get(i + 1);
+      if (!ele || !score_str ||
+          !ListpackMemberInLexRange(*ele, min, max, min_ex, max_ex)) {
+        continue;
+      }
+      if (offset > 0) {
+        offset--;
+        continue;
+      }
+      auto parsed = ParseFiniteDouble(score_str->ToString());
+      if (!std::holds_alternative<double>(parsed)) continue;
+      result.push_back({ele->ToString(), std::get<double>(parsed)});
+      if (count >= 0 && static_cast<long long>(result.size()) >= count) break;
+    }
+    return result;
+  }
+
   // Lex operations scan all elements (require same score for correct semantics)
   auto all = Range(0, -1);
   long long skipped = 0;
@@ -452,11 +527,7 @@ size_t ZSetValue::RemoveRangeByLex(std::string_view min, std::string_view max,
         i += 2;
         continue;
       }
-      std::string elem = ele->ToString();
-      bool in_range = true;
-      if (min_ex ? elem <= min : elem < min) in_range = false;
-      if (max_ex ? elem >= max : elem > max) in_range = false;
-      if (in_range) {
+      if (ListpackMemberInLexRange(*ele, min, max, min_ex, max_ex)) {
         lp->Delete(i + 1);
         lp->Delete(i);
         removed++;

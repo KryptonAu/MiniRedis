@@ -1,11 +1,15 @@
+#include "ds/skiplist.h"
+
 #include <gtest/gtest.h>
 
-#include "ds/skiplist.h"
+#include <string>
+#include <string_view>
 
 namespace miniredis::ds {
 namespace {
 
 using IntSkiplist = Skiplist<int, double>;
+using StringSkiplist = Skiplist<std::string, double>;
 
 // ===== Construction =====
 TEST(SkiplistTest, ConstructEmpty) {
@@ -150,6 +154,49 @@ TEST(SkiplistTest, SameScoreOrdersByKey) {
   EXPECT_EQ(node->key, 20);
   node = node->levels[0].forward;
   EXPECT_EQ(node->key, 30);
+}
+
+TEST(SkiplistTest, StringViewOperationsUseSubviewContents) {
+  StringSkiplist sl;
+  std::string source = "xxalphayy";
+  std::string_view alpha(source.data() + 2, 5);
+
+  auto* alpha_node = sl.InsertView(1.0, alpha);
+  ASSERT_NE(alpha_node, nullptr);
+  EXPECT_EQ(alpha_node->key, "alpha");
+  source[2] = 'X';
+  EXPECT_EQ(alpha_node->key, "alpha");
+
+  sl.InsertView(1.0, "gamma");
+  std::string beta_source = "__beta__";
+  std::string_view beta(beta_source.data() + 2, 4);
+  sl.InsertView(1.0, beta);
+
+  std::string lookup_source = "zzalphazz";
+  std::string_view alpha_lookup(lookup_source.data() + 2, 5);
+  auto rank = sl.GetRankView(1.0, alpha_lookup);
+  ASSERT_TRUE(rank.has_value());
+  EXPECT_EQ(*rank, 1);
+
+  auto* node = sl.First();
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node->key, "alpha");
+  node = node->levels[0].forward;
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node->key, "beta");
+  node = node->levels[0].forward;
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node->key, "gamma");
+
+  std::string delete_source = "qqbetaqq";
+  std::string_view beta_lookup(delete_source.data() + 2, 4);
+  EXPECT_TRUE(sl.DeleteView(1.0, beta_lookup));
+  EXPECT_EQ(sl.Size(), 2);
+  EXPECT_FALSE(sl.GetRankView(1.0, beta_lookup).has_value());
+  ASSERT_NE(sl.First(), nullptr);
+  EXPECT_EQ(sl.First()->key, "alpha");
+  ASSERT_NE(sl.First()->levels[0].forward, nullptr);
+  EXPECT_EQ(sl.First()->levels[0].forward->key, "gamma");
 }
 
 // ===== Range queries =====

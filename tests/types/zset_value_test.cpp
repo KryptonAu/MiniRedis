@@ -3,6 +3,8 @@
 #include <gtest/gtest.h>
 
 #include <cmath>
+#include <string>
+#include <string_view>
 
 namespace miniredis {
 namespace {
@@ -185,6 +187,114 @@ TEST(ZSetValueTest, RangeByScoreWithSkiplist) {
   ASSERT_EQ(r.size(), 2);
   EXPECT_EQ(r[0].element, "b");
   EXPECT_EQ(r[1].element, "c");
+}
+
+TEST(ZSetValueTest, ListpackEncodingAcceptsSubviewElements) {
+  ZSetValue zs;
+  std::string insert_source = "__alpha__";
+  std::string_view alpha(insert_source.data() + 2, 5);
+
+  auto added = zs.Add(alpha, 1.5);
+  ASSERT_TRUE(std::holds_alternative<bool>(added));
+  EXPECT_TRUE(std::get<bool>(added));
+  EXPECT_EQ(zs.Encoding(), ValueEncoding::kZSetListpack);
+  insert_source[2] = 'X';
+
+  std::string lookup_source = "zzalphazz";
+  std::string_view alpha_lookup(lookup_source.data() + 2, 5);
+  ASSERT_TRUE(zs.Score(alpha_lookup).has_value());
+  EXPECT_DOUBLE_EQ(zs.Score(alpha_lookup).value(), 1.5);
+  ASSERT_TRUE(zs.Rank(alpha_lookup).has_value());
+  EXPECT_EQ(zs.Rank(alpha_lookup).value(), 0);
+
+  auto updated = zs.Update(alpha_lookup, 0.5);
+  ASSERT_TRUE(std::holds_alternative<double>(updated));
+  EXPECT_DOUBLE_EQ(std::get<double>(updated), 2.0);
+  EXPECT_DOUBLE_EQ(zs.Score(alpha_lookup).value(), 2.0);
+
+  std::string remove_source = "qqalphaqq";
+  std::string_view alpha_remove(remove_source.data() + 2, 5);
+  EXPECT_TRUE(zs.Remove(alpha_remove));
+  EXPECT_FALSE(zs.Score(alpha_lookup).has_value());
+}
+
+TEST(ZSetValueTest, ListpackEncodingFindsIntegerEncodedMembers) {
+  ZSetValue zs;
+  zs.Add("1", 1.0);
+  zs.Add("001", 2.0);
+  EXPECT_EQ(zs.Encoding(), ValueEncoding::kZSetListpack);
+  EXPECT_EQ(zs.Count(), 2);
+
+  ASSERT_TRUE(zs.Score("1").has_value());
+  EXPECT_DOUBLE_EQ(zs.Score("1").value(), 1.0);
+  ASSERT_TRUE(zs.Score("001").has_value());
+  EXPECT_DOUBLE_EQ(zs.Score("001").value(), 2.0);
+
+  auto updated = zs.Update("1", 2.0);
+  ASSERT_TRUE(std::holds_alternative<double>(updated));
+  EXPECT_DOUBLE_EQ(std::get<double>(updated), 3.0);
+  EXPECT_DOUBLE_EQ(zs.Score("1").value(), 3.0);
+  EXPECT_DOUBLE_EQ(zs.Score("001").value(), 2.0);
+
+  EXPECT_TRUE(zs.Remove("1"));
+  EXPECT_FALSE(zs.Score("1").has_value());
+  EXPECT_TRUE(zs.Score("001").has_value());
+}
+
+TEST(ZSetValueTest, ListpackLexOperationsCompareEncodedMembersInPlace) {
+  ZSetValue zs;
+  zs.Add("1", 1.0);
+  zs.Add("2", 1.0);
+  zs.Add("a", 1.0);
+  zs.Add("b", 1.0);
+  EXPECT_EQ(zs.Encoding(), ValueEncoding::kZSetListpack);
+
+  EXPECT_EQ(zs.LexCount("1", "a", false, false), 3);
+  auto range = zs.RangeByLex("1", "a", false, false);
+  ASSERT_EQ(range.size(), 3);
+  EXPECT_EQ(range[0].element, "1");
+  EXPECT_EQ(range[1].element, "2");
+  EXPECT_EQ(range[2].element, "a");
+
+  EXPECT_EQ(zs.RemoveRangeByLex("2", "a", false, false), 2);
+  EXPECT_EQ(zs.Count(), 2);
+  EXPECT_TRUE(zs.Score("1").has_value());
+  EXPECT_TRUE(zs.Score("b").has_value());
+  EXPECT_FALSE(zs.Score("2").has_value());
+  EXPECT_FALSE(zs.Score("a").has_value());
+}
+
+TEST(ZSetValueTest, SkiplistEncodingAcceptsSubviewElements) {
+  EncodingThresholds t;
+  t.zset_max_listpack_entries = 1;
+  ZSetValue zs(t);
+  zs.Add("seed", 0.0);
+  zs.Add("omega", 10.0);
+  ASSERT_EQ(zs.Encoding(), ValueEncoding::kSkiplist);
+
+  std::string insert_source = "__alpha__";
+  std::string_view alpha(insert_source.data() + 2, 5);
+  auto added = zs.Add(alpha, 1.5);
+  ASSERT_TRUE(std::holds_alternative<bool>(added));
+  EXPECT_TRUE(std::get<bool>(added));
+  insert_source[2] = 'X';
+
+  std::string lookup_source = "zzalphazz";
+  std::string_view alpha_lookup(lookup_source.data() + 2, 5);
+  ASSERT_TRUE(zs.Score(alpha_lookup).has_value());
+  EXPECT_DOUBLE_EQ(zs.Score(alpha_lookup).value(), 1.5);
+  ASSERT_TRUE(zs.Rank(alpha_lookup).has_value());
+  EXPECT_EQ(zs.Rank(alpha_lookup).value(), 1);
+
+  auto updated = zs.Update(alpha_lookup, 0.5);
+  ASSERT_TRUE(std::holds_alternative<double>(updated));
+  EXPECT_DOUBLE_EQ(std::get<double>(updated), 2.0);
+  EXPECT_DOUBLE_EQ(zs.Score(alpha_lookup).value(), 2.0);
+
+  std::string remove_source = "qqalphaqq";
+  std::string_view alpha_remove(remove_source.data() + 2, 5);
+  EXPECT_TRUE(zs.Remove(alpha_remove));
+  EXPECT_FALSE(zs.Score(alpha_lookup).has_value());
 }
 
 // RevRange(1, -1) should skip max element
