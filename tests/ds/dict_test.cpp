@@ -1,6 +1,8 @@
+#include "ds/dict.h"
+
 #include <gtest/gtest.h>
 
-#include "ds/dict.h"
+#include <string_view>
 
 namespace miniredis::ds {
 namespace {
@@ -122,6 +124,50 @@ TEST(DictTest, SetUpdatesExisting) {
   EXPECT_EQ(*d.Find(1), "second");
 }
 
+TEST(DictTest, StringViewOperationsUseSubviewContents) {
+  Dict<std::string, int> d;
+  std::string source = "xxalphayy";
+  std::string_view alpha(source.data() + 2, 5);
+
+  EXPECT_TRUE(d.AddView(alpha, 1));
+  EXPECT_EQ(d.Size(), 1);
+  ASSERT_NE(d.FindView(alpha), nullptr);
+  EXPECT_EQ(*d.FindView(alpha), 1);
+
+  std::string lookup_source = "zzalphazz";
+  std::string_view alpha_lookup(lookup_source.data() + 2, 5);
+  EXPECT_FALSE(d.AddView(alpha_lookup, 2));
+  EXPECT_TRUE(d.SetView(alpha_lookup, 3));
+  EXPECT_EQ(d.Size(), 1);
+  ASSERT_NE(d.FindView(alpha_lookup), nullptr);
+  EXPECT_EQ(*d.FindView(alpha_lookup), 3);
+
+  EXPECT_TRUE(d.DeleteView(alpha_lookup));
+  EXPECT_EQ(d.Size(), 0);
+  EXPECT_EQ(d.FindView(alpha_lookup), nullptr);
+}
+
+TEST(DictTest, StringViewSetInsertsAndUpdatesWithoutChangingSize) {
+  Dict<std::string, int> d;
+  std::string source = "__key__";
+  std::string_view key(source.data() + 2, 3);
+
+  EXPECT_TRUE(d.SetView(key, 10));
+  EXPECT_EQ(d.Size(), 1);
+  ASSERT_NE(d.FindView(key), nullptr);
+  EXPECT_EQ(*d.FindView(key), 10);
+
+  EXPECT_TRUE(d.SetView(key, 20));
+  EXPECT_EQ(d.Size(), 1);
+  ASSERT_NE(d.FindView("key"), nullptr);
+  EXPECT_EQ(*d.FindView("key"), 20);
+
+  EXPECT_TRUE(d.SetView("other", 30));
+  EXPECT_EQ(d.Size(), 2);
+  ASSERT_NE(d.FindView("other"), nullptr);
+  EXPECT_EQ(*d.FindView("other"), 30);
+}
+
 TEST(DictTest, DeleteTriggersShrink) {
   Dict<int, std::string> d;
   // Add many items to expand the table
@@ -236,7 +282,7 @@ TEST(DictTest, SafeIteratorDeleteCurrentEntry) {
   EXPECT_EQ(it->key, 1);  // or whatever first entry is
   int first_key = it->key;
   d.Delete(first_key);  // delete while iterator points to it
-  ++it;                  // must advance safely via pre-computed next
+  ++it;                 // must advance safely via pre-computed next
 
   // Should still reach remaining entries
   ASSERT_NE(it, end);
@@ -266,7 +312,7 @@ TEST(DictTest, SafeIteratorDeleteMultipleDuringIteration) {
     }
     ++it;
   }
-  EXPECT_EQ(seen, 10);  // iterated all original entries
+  EXPECT_EQ(seen, 10);     // iterated all original entries
   EXPECT_EQ(d.Size(), 5);  // 5 odd keys left
 }
 

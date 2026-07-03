@@ -5,6 +5,10 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <string>
+#include <string_view>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 namespace miniredis {
@@ -47,11 +51,19 @@ class Dict {
   size_t Buckets() const;
   bool IsRehashing() const;
 
-  bool Add(Key key, Value value);
-  bool Set(Key key, Value value);
+  bool Add(const Key& key, Value value);
+  bool Add(Key&& key, Value value);
+  bool Set(const Key& key, Value value);
+  bool Set(Key&& key, Value value);
   Value* Find(const Key& key);
   const Value* Find(const Key& key) const;
   bool Delete(const Key& key);
+
+  Value* FindView(std::string_view key);
+  const Value* FindView(std::string_view key) const;
+  bool DeleteView(std::string_view key);
+  bool AddView(std::string_view key, Value value);
+  bool SetView(std::string_view key, Value value);
   void Clear();
 
   class Iterator {
@@ -162,10 +174,25 @@ class Dict {
 
   void MaybeRehashStep();
   size_t HashKey(const Key& key) const;
+  static size_t HashStringView(std::string_view key);
   static size_t NextPower(size_t size);
   bool ExpandIfNeeded();
   bool ShrinkIfNeeded();
   bool Resize(size_t new_size);
+
+  template <typename LookupKey, typename EqualFn>
+  Entry* FindEntryWithHash(const LookupKey& key, size_t hash, EqualFn equal_fn);
+  template <typename LookupKey, typename EqualFn>
+  const Entry* FindEntryWithHash(const LookupKey& key, size_t hash,
+                                 EqualFn equal_fn) const;
+  template <typename StoredKey>
+  void InsertEntry(size_t hash, StoredKey&& key, Value value);
+  template <typename StoredKey>
+  bool AddImpl(StoredKey&& key, Value value);
+  template <typename StoredKey>
+  bool SetImpl(StoredKey&& key, Value value);
+  template <typename LookupKey, typename EqualFn>
+  bool DeleteWithHash(const LookupKey& key, size_t hash, EqualFn equal_fn);
 
   friend class Iterator;
   friend class SafeIterator;
@@ -230,6 +257,13 @@ bool Dict<Key, Value, Hash, KeyEqual>::IsRehashing() const {
 template <typename Key, typename Value, typename Hash, typename KeyEqual>
 size_t Dict<Key, Value, Hash, KeyEqual>::HashKey(const Key& key) const {
   return hash_(key);
+}
+
+template <typename Key, typename Value, typename Hash, typename KeyEqual>
+size_t Dict<Key, Value, Hash, KeyEqual>::HashStringView(std::string_view key) {
+  static_assert(std::is_same_v<Key, std::string>,
+                "string_view lookup is only available for string keys");
+  return std::hash<std::string_view>{}(key);
 }
 
 template <typename Key, typename Value, typename Hash, typename KeyEqual>
@@ -326,81 +360,108 @@ void Dict<Key, Value, Hash, KeyEqual>::MaybeRehashStep() {
 }
 
 template <typename Key, typename Value, typename Hash, typename KeyEqual>
-bool Dict<Key, Value, Hash, KeyEqual>::Add(Key key, Value value) {
-  MaybeRehashStep();
-
-  // Check if key exists in either table
-  size_t h = HashKey(key);
-
-  auto find_in_table = [&](DictTable<Key, Value>& table) -> Entry* {
+template <typename LookupKey, typename EqualFn>
+const typename Dict<Key, Value, Hash, KeyEqual>::Entry*
+Dict<Key, Value, Hash, KeyEqual>::FindEntryWithHash(const LookupKey& key,
+                                                    size_t hash,
+                                                    EqualFn equal_fn) const {
+  auto find_in_table = [&](const DictTable<Key, Value>& table) -> const Entry* {
     if (table.size == 0) return nullptr;
-    size_t idx = h & table.size_mask;
-    Entry* entry = table.buckets[idx].get();
+    size_t idx = hash & table.size_mask;
+    const Entry* entry = table.buckets[idx].get();
     while (entry) {
-      if (key_equal_(entry->key, key)) return entry;
+      if (equal_fn(entry->key, key)) return entry;
       entry = entry->next.get();
     }
     return nullptr;
   };
 
-  if (find_in_table(ht_[0]) || find_in_table(ht_[1])) return false;
+  if (auto* entry = find_in_table(ht_[0])) return entry;
+  if (IsRehashing()) return find_in_table(ht_[1]);
+  return nullptr;
+}
 
-  // Insert into ht_[1] if rehashing, otherwise ht_[0]
+template <typename Key, typename Value, typename Hash, typename KeyEqual>
+template <typename LookupKey, typename EqualFn>
+typename Dict<Key, Value, Hash, KeyEqual>::Entry*
+Dict<Key, Value, Hash, KeyEqual>::FindEntryWithHash(const LookupKey& key,
+                                                    size_t hash,
+                                                    EqualFn equal_fn) {
+  const auto* result =
+      static_cast<const Dict*>(this)->FindEntryWithHash(key, hash, equal_fn);
+  return const_cast<Entry*>(result);
+}
+
+template <typename Key, typename Value, typename Hash, typename KeyEqual>
+template <typename StoredKey>
+void Dict<Key, Value, Hash, KeyEqual>::InsertEntry(size_t hash, StoredKey&& key,
+                                                   Value value) {
   DictTable<Key, Value>& target = IsRehashing() ? ht_[1] : ht_[0];
-  size_t idx = h & target.size_mask;
+  size_t idx = hash & target.size_mask;
 
   auto new_entry = std::make_unique<Entry>();
-  new_entry->key = std::move(key);
+  new_entry->key = std::forward<StoredKey>(key);
   new_entry->value = std::move(value);
   new_entry->next = std::move(target.buckets[idx]);
   target.buckets[idx] = std::move(new_entry);
   target.used++;
+}
+
+template <typename Key, typename Value, typename Hash, typename KeyEqual>
+template <typename StoredKey>
+bool Dict<Key, Value, Hash, KeyEqual>::AddImpl(StoredKey&& key, Value value) {
+  MaybeRehashStep();
+
+  const Key& lookup_key = key;
+  size_t h = HashKey(lookup_key);
+  auto equal = [this](const Key& stored, const Key& lookup) {
+    return key_equal_(stored, lookup);
+  };
+
+  if (FindEntryWithHash(lookup_key, h, equal)) return false;
+
+  InsertEntry(h, std::forward<StoredKey>(key), std::move(value));
   return true;
 }
 
 template <typename Key, typename Value, typename Hash, typename KeyEqual>
-bool Dict<Key, Value, Hash, KeyEqual>::Set(Key key, Value value) {
+template <typename StoredKey>
+bool Dict<Key, Value, Hash, KeyEqual>::SetImpl(StoredKey&& key, Value value) {
   MaybeRehashStep();
 
-  size_t h = HashKey(key);
+  const Key& lookup_key = key;
+  size_t h = HashKey(lookup_key);
+  auto equal = [this](const Key& stored, const Key& lookup) {
+    return key_equal_(stored, lookup);
+  };
 
-  // Search ht_[0]
-  if (ht_[0].size > 0) {
-    size_t idx = h & ht_[0].size_mask;
-    Entry* entry = ht_[0].buckets[idx].get();
-    while (entry) {
-      if (key_equal_(entry->key, key)) {
-        entry->value = std::move(value);
-        return true;  // Updated existing
-      }
-      entry = entry->next.get();
-    }
+  if (auto* entry = FindEntryWithHash(lookup_key, h, equal)) {
+    entry->value = std::move(value);
+    return true;
   }
 
-  // Search ht_[1]
-  if (IsRehashing() && ht_[1].size > 0) {
-    size_t idx = h & ht_[1].size_mask;
-    Entry* entry = ht_[1].buckets[idx].get();
-    while (entry) {
-      if (key_equal_(entry->key, key)) {
-        entry->value = std::move(value);
-        return true;  // Updated existing
-      }
-      entry = entry->next.get();
-    }
-  }
-
-  // Not found — insert as new
-  DictTable<Key, Value>& target = IsRehashing() ? ht_[1] : ht_[0];
-  size_t idx = h & target.size_mask;
-
-  auto new_entry = std::make_unique<Entry>();
-  new_entry->key = std::move(key);
-  new_entry->value = std::move(value);
-  new_entry->next = std::move(target.buckets[idx]);
-  target.buckets[idx] = std::move(new_entry);
-  target.used++;
+  InsertEntry(h, std::forward<StoredKey>(key), std::move(value));
   return true;
+}
+
+template <typename Key, typename Value, typename Hash, typename KeyEqual>
+bool Dict<Key, Value, Hash, KeyEqual>::Add(const Key& key, Value value) {
+  return AddImpl(key, std::move(value));
+}
+
+template <typename Key, typename Value, typename Hash, typename KeyEqual>
+bool Dict<Key, Value, Hash, KeyEqual>::Add(Key&& key, Value value) {
+  return AddImpl(std::move(key), std::move(value));
+}
+
+template <typename Key, typename Value, typename Hash, typename KeyEqual>
+bool Dict<Key, Value, Hash, KeyEqual>::Set(const Key& key, Value value) {
+  return SetImpl(key, std::move(value));
+}
+
+template <typename Key, typename Value, typename Hash, typename KeyEqual>
+bool Dict<Key, Value, Hash, KeyEqual>::Set(Key&& key, Value value) {
+  return SetImpl(std::move(key), std::move(value));
 }
 
 template <typename Key, typename Value, typename Hash, typename KeyEqual>
@@ -412,38 +473,101 @@ Value* Dict<Key, Value, Hash, KeyEqual>::Find(const Key& key) {
 
 template <typename Key, typename Value, typename Hash, typename KeyEqual>
 const Value* Dict<Key, Value, Hash, KeyEqual>::Find(const Key& key) const {
-  size_t h = HashKey(key);
-
-  auto find_in_table = [&](const DictTable<Key, Value>& table) -> const Value* {
-    if (table.size == 0) return nullptr;
-    size_t idx = h & table.size_mask;
-    const Entry* entry = table.buckets[idx].get();
-    while (entry) {
-      if (key_equal_(entry->key, key)) return &entry->value;
-      entry = entry->next.get();
-    }
-    return nullptr;
+  auto equal = [this](const Key& stored, const Key& lookup) {
+    return key_equal_(stored, lookup);
   };
+  const Entry* entry = FindEntryWithHash(key, HashKey(key), equal);
+  return entry ? &entry->value : nullptr;
+}
 
-  if (auto* val = find_in_table(ht_[0])) return val;
-  if (IsRehashing()) return find_in_table(ht_[1]);
-  return nullptr;
+template <typename Key, typename Value, typename Hash, typename KeyEqual>
+Value* Dict<Key, Value, Hash, KeyEqual>::FindView(std::string_view key) {
+  const auto* result = static_cast<const Dict*>(this)->FindView(key);
+  return const_cast<Value*>(result);
+}
+
+template <typename Key, typename Value, typename Hash, typename KeyEqual>
+const Value* Dict<Key, Value, Hash, KeyEqual>::FindView(
+    std::string_view key) const {
+  static_assert(std::is_same_v<Key, std::string>,
+                "string_view lookup is only available for string keys");
+  auto equal = [](const Key& stored, std::string_view lookup) {
+    return std::string_view(stored) == lookup;
+  };
+  const Entry* entry = FindEntryWithHash(key, HashStringView(key), equal);
+  return entry ? &entry->value : nullptr;
+}
+
+template <typename Key, typename Value, typename Hash, typename KeyEqual>
+bool Dict<Key, Value, Hash, KeyEqual>::AddView(std::string_view key,
+                                               Value value) {
+  static_assert(std::is_same_v<Key, std::string>,
+                "string_view lookup is only available for string keys");
+  MaybeRehashStep();
+
+  size_t h = HashStringView(key);
+  auto equal = [](const Key& stored, std::string_view lookup) {
+    return std::string_view(stored) == lookup;
+  };
+  if (FindEntryWithHash(key, h, equal)) return false;
+
+  InsertEntry(h, std::string(key), std::move(value));
+  return true;
+}
+
+template <typename Key, typename Value, typename Hash, typename KeyEqual>
+bool Dict<Key, Value, Hash, KeyEqual>::SetView(std::string_view key,
+                                               Value value) {
+  static_assert(std::is_same_v<Key, std::string>,
+                "string_view lookup is only available for string keys");
+  MaybeRehashStep();
+
+  size_t h = HashStringView(key);
+  auto equal = [](const Key& stored, std::string_view lookup) {
+    return std::string_view(stored) == lookup;
+  };
+  if (auto* entry = FindEntryWithHash(key, h, equal)) {
+    entry->value = std::move(value);
+    return true;
+  }
+
+  InsertEntry(h, std::string(key), std::move(value));
+  return true;
 }
 
 template <typename Key, typename Value, typename Hash, typename KeyEqual>
 bool Dict<Key, Value, Hash, KeyEqual>::Delete(const Key& key) {
+  auto equal = [this](const Key& stored, const Key& lookup) {
+    return key_equal_(stored, lookup);
+  };
+  return DeleteWithHash(key, HashKey(key), equal);
+}
+
+template <typename Key, typename Value, typename Hash, typename KeyEqual>
+bool Dict<Key, Value, Hash, KeyEqual>::DeleteView(std::string_view key) {
+  static_assert(std::is_same_v<Key, std::string>,
+                "string_view lookup is only available for string keys");
+  auto equal = [](const Key& stored, std::string_view lookup) {
+    return std::string_view(stored) == lookup;
+  };
+  return DeleteWithHash(key, HashStringView(key), equal);
+}
+
+template <typename Key, typename Value, typename Hash, typename KeyEqual>
+template <typename LookupKey, typename EqualFn>
+bool Dict<Key, Value, Hash, KeyEqual>::DeleteWithHash(const LookupKey& key,
+                                                      size_t hash,
+                                                      EqualFn equal_fn) {
   if (ht_[0].size == 0 && ht_[1].size == 0) return false;
 
   if (safe_iterators_ == 0) MaybeRehashStep();
 
-  size_t h = HashKey(key);
-
   auto delete_from_table = [&](DictTable<Key, Value>& table) -> bool {
     if (table.size == 0) return false;
-    size_t idx = h & table.size_mask;
+    size_t idx = hash & table.size_mask;
     auto* prev = &table.buckets[idx];
     while (*prev) {
-      if (key_equal_((*prev)->key, key)) {
+      if (equal_fn((*prev)->key, key)) {
         auto to_delete = std::move(*prev);
         *prev = std::move(to_delete->next);
         table.used--;

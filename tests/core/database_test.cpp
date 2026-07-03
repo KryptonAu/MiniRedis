@@ -2,6 +2,8 @@
 
 #include <gtest/gtest.h>
 
+#include <string_view>
+
 namespace miniredis {
 namespace {
 
@@ -68,6 +70,47 @@ TEST(DatabaseTest, PurgeExpiredKeysUsesCurrentIteratorEntry) {
   EXPECT_FALSE(db.Exists("expired"));
   EXPECT_TRUE(db.Exists("live"));
   EXPECT_EQ(db.ExpiresSize(), 1u);
+}
+
+TEST(DatabaseTest, StringViewKeyOperationsUseSubviewContents) {
+  Database db;
+  std::string source = "xxalphayy";
+  std::string_view key(source.data() + 2, 5);
+
+  EXPECT_TRUE(db.Set(key, StringValue("value")));
+  EXPECT_NE(db.Find(key), nullptr);
+
+  EXPECT_TRUE(db.SetExpire(key, 9999999999999LL));
+  EXPECT_GT(db.TTL(key), 0);
+  EXPECT_TRUE(db.Persist(key));
+  EXPECT_EQ(db.TTL(key), -1);
+
+  EXPECT_TRUE(db.SetExpire(key, 0));
+  EXPECT_TRUE(db.IsExpired(key));
+  EXPECT_EQ(db.Find(key), nullptr);
+
+  EXPECT_TRUE(db.Set(key, StringValue("value")));
+  EXPECT_TRUE(db.Delete(key));
+  EXPECT_FALSE(db.Exists(key));
+}
+
+TEST(DatabaseTest, RenameNXUsesStringViewTargetLookup) {
+  Database db;
+  std::string old_source = "__old__";
+  std::string new_source = "xxnewyy";
+  std::string_view old_key(old_source.data() + 2, 3);
+  std::string_view new_key(new_source.data() + 2, 3);
+
+  EXPECT_TRUE(db.Set(old_key, StringValue("old")));
+  EXPECT_TRUE(db.Set(new_key, StringValue("new")));
+  EXPECT_FALSE(db.RenameNX(old_key, new_key));
+  EXPECT_TRUE(db.Exists(old_key));
+  EXPECT_TRUE(db.Exists(new_key));
+
+  EXPECT_TRUE(db.Delete(new_key));
+  EXPECT_TRUE(db.RenameNX(old_key, new_key));
+  EXPECT_FALSE(db.Exists(old_key));
+  EXPECT_TRUE(db.Exists(new_key));
 }
 
 }  // namespace
