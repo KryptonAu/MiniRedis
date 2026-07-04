@@ -5,9 +5,18 @@
 #include <atomic>
 #include <stdexec/execution.hpp>
 #include <thread>
+#include <vector>
 
 namespace miniredis {
 namespace {
+
+struct TestCmdOp : CmdOpBase {
+  bool completed = false;
+  bool stopped = false;
+
+  void Complete() noexcept override { completed = true; }
+  void CompleteStopped() noexcept override { stopped = true; }
+};
 
 TEST(CmdContextTest, ScheduleRunsOnCmdThread) {
   CmdContext ctx;
@@ -51,6 +60,39 @@ TEST(CmdContextTest, MultipleOpsExecuteInFifoOrder) {
 
   ctx.Stop();
   cmd_thread.join();
+}
+
+TEST(CmdContextTest, SmallCapacityRunsQueuedOpsInFifoOrder) {
+  CmdContext ctx(3);
+  std::vector<int> order;
+
+  EXPECT_TRUE(ctx.PostFunction([&] { order.push_back(0); }));
+  EXPECT_TRUE(ctx.PostFunction([&] { order.push_back(1); }));
+  EXPECT_TRUE(ctx.PostFunction([&] {
+    order.push_back(2);
+    ctx.Stop();
+  }));
+
+  std::thread cmd_thread([&] { ctx.Run(); });
+  cmd_thread.join();
+
+  ASSERT_EQ(order.size(), 3u);
+  EXPECT_EQ(order[0], 0);
+  EXPECT_EQ(order[1], 1);
+  EXPECT_EQ(order[2], 2);
+}
+
+TEST(CmdContextTest, EnqueueReturnsFalseWhenRingIsFull) {
+  CmdContext ctx(2);
+  TestCmdOp first;
+  TestCmdOp second;
+  TestCmdOp third;
+
+  EXPECT_TRUE(ctx.Enqueue(&first));
+  EXPECT_TRUE(ctx.Enqueue(&second));
+  EXPECT_FALSE(ctx.Enqueue(&third));
+  EXPECT_FALSE(third.completed);
+  EXPECT_FALSE(third.stopped);
 }
 
 TEST(CmdContextTest, StopWakesRunAndStopsQueuedOps) {

@@ -1,12 +1,14 @@
 #pragma once
 
 #include <atomic>
-#include <condition_variable>
-#include <deque>
+#include <cstddef>
 #include <functional>
-#include <mutex>
 #include <stdexec/execution.hpp>
 #include <thread>
+#include <utility>
+#include <vector>
+
+#include "core/config.h"
 
 namespace miniredis {
 
@@ -75,6 +77,7 @@ inline auto CmdScheduleSender::connect(Rcvr rcvr) const noexcept
 
 // ===========================================================================
 // CmdContext — owning single-threaded command execution context.
+// The queue is SPSC: one producer thread schedules work for the CMD thread.
 // ===========================================================================
 class CmdContext {
  public:
@@ -100,7 +103,8 @@ class CmdContext {
     CmdContext* ctx_ = nullptr;
   };
 
-  CmdContext() = default;
+  explicit CmdContext(
+      size_t queue_capacity = MiniRedisConfig{}.command_queue_capacity);
   ~CmdContext() = default;
 
   CmdContext(const CmdContext&) = delete;
@@ -112,18 +116,24 @@ class CmdContext {
   void Stop();
   bool IsOnThread() const noexcept;
 
-  // Returns false if the context is stopping (caller should deliver
-  // set_stopped() immediately). Thread-safe.
+  // Returns false if the context is stopping or the bounded SPSC queue is full
+  // (caller should deliver set_stopped() immediately). Single-producer only.
   bool Enqueue(CmdOpBase* op) noexcept;
 
   // Post a function to be executed on the CMD thread. Returns false if
-  // stopping. Thread-safe.
+  // stopping or the bounded SPSC queue is full. Single-producer only.
   bool PostFunction(std::function<void()> fn);
 
  private:
-  std::mutex mutex_;
-  std::condition_variable cv_;
-  std::deque<CmdOpBase*> queue_;
+  CmdOpBase* TryDequeue() noexcept;
+  void WakeConsumer() noexcept;
+  void FinishEnqueue() noexcept;
+
+  std::vector<CmdOpBase*> queue_;
+  std::atomic<size_t> head_{0};
+  std::atomic<size_t> tail_{0};
+  std::atomic<size_t> wake_sequence_{0};
+  std::atomic<size_t> active_enqueues_{0};
   std::atomic<bool> stopping_{false};
   std::thread::id cmd_thread_id_{};
 };
@@ -163,50 +173,49 @@ inline void CmdScheduleOpState<Rcvr>::start() & noexcept {
 // ===========================================================================
 // Inline implementations
 // ===========================================================================
+inline CmdContext::CmdContext(size_t queue_capacity)
+    : queue_(queue_capacity == 0 ? 1 : queue_capacity, nullptr) {}
+
 inline void CmdContext::Run() {
   cmd_thread_id_ = std::this_thread::get_id();
 
   while (true) {
-    CmdOpBase* op = nullptr;
-
-    {
-      std::unique_lock<std::mutex> lock(mutex_);
-      cv_.wait(lock, [this] {
-        return !queue_.empty() || stopping_.load(std::memory_order_acquire);
-      });
-
-      if (queue_.empty() && stopping_.load(std::memory_order_acquire)) break;
-
-      if (!queue_.empty()) {
-        op = queue_.front();
-        queue_.pop_front();
-      }
-    }
-
-    if (op != nullptr) {
+    if (auto* op = TryDequeue(); op != nullptr) {
       op->Complete();
+      continue;
     }
+
+    if (stopping_.load(std::memory_order_acquire) &&
+        active_enqueues_.load(std::memory_order_acquire) == 0) {
+      break;
+    }
+
+    const size_t observed = wake_sequence_.load(std::memory_order_acquire);
+
+    if (auto* op = TryDequeue(); op != nullptr) {
+      op->Complete();
+      continue;
+    }
+
+    if (stopping_.load(std::memory_order_acquire) &&
+        active_enqueues_.load(std::memory_order_acquire) == 0) {
+      break;
+    }
+
+    wake_sequence_.wait(observed, std::memory_order_acquire);
   }
 
   // Drain remaining queued operations — complete them with set_stopped.
-  {
-    std::unique_lock<std::mutex> lock(mutex_);
-    while (!queue_.empty()) {
-      auto* op = queue_.front();
-      queue_.pop_front();
-      lock.unlock();
-      op->CompleteStopped();
-      lock.lock();
-    }
+  while (true) {
+    auto* op = TryDequeue();
+    if (op == nullptr) break;
+    op->CompleteStopped();
   }
 }
 
 inline void CmdContext::Stop() {
-  {
-    std::lock_guard<std::mutex> lock(mutex_);
-    stopping_.store(true, std::memory_order_release);
-  }
-  cv_.notify_all();
+  stopping_.store(true, std::memory_order_release);
+  WakeConsumer();
 }
 
 inline bool CmdContext::IsOnThread() const noexcept {
@@ -217,14 +226,50 @@ inline bool CmdContext::Enqueue(CmdOpBase* op) noexcept {
   // If stopping, reject so the caller can deliver set_stopped().
   if (stopping_.load(std::memory_order_acquire)) return false;
 
-  {
-    std::lock_guard<std::mutex> lock(mutex_);
-    // Double-check under the lock.
-    if (stopping_.load(std::memory_order_relaxed)) return false;
-    queue_.push_back(op);
+  active_enqueues_.fetch_add(1, std::memory_order_acq_rel);
+
+  if (stopping_.load(std::memory_order_acquire)) {
+    FinishEnqueue();
+    return false;
   }
-  cv_.notify_one();
+
+  const size_t tail = tail_.load(std::memory_order_relaxed);
+  const size_t head = head_.load(std::memory_order_acquire);
+  if (tail - head >= queue_.size()) {
+    FinishEnqueue();
+    return false;
+  }
+
+  queue_[tail % queue_.size()] = op;
+  tail_.store(tail + 1, std::memory_order_release);
+  FinishEnqueue();
+  WakeConsumer();
   return true;
+}
+
+inline CmdOpBase* CmdContext::TryDequeue() noexcept {
+  const size_t head = head_.load(std::memory_order_relaxed);
+  const size_t tail = tail_.load(std::memory_order_acquire);
+  if (head == tail) return nullptr;
+
+  const size_t slot = head % queue_.size();
+  auto* op = queue_[slot];
+  queue_[slot] = nullptr;
+  head_.store(head + 1, std::memory_order_release);
+  return op;
+}
+
+inline void CmdContext::WakeConsumer() noexcept {
+  wake_sequence_.fetch_add(1, std::memory_order_release);
+  wake_sequence_.notify_one();
+}
+
+inline void CmdContext::FinishEnqueue() noexcept {
+  const size_t previous =
+      active_enqueues_.fetch_sub(1, std::memory_order_acq_rel);
+  if (previous == 1 && stopping_.load(std::memory_order_acquire)) {
+    WakeConsumer();
+  }
 }
 
 inline bool CmdContext::PostFunction(std::function<void()> fn) {

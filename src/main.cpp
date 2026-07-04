@@ -123,7 +123,7 @@ int main(int argc, char* argv[]) {
   SetupSignalHandling();
 
   EpollContext io_ctx;
-  CmdContext cmd_ctx;
+  CmdContext cmd_ctx(config.command_queue_capacity);
   auto io_sched = io_ctx.get_scheduler();
   auto cmd_sched = cmd_ctx.get_scheduler();
 

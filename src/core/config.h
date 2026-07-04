@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -27,6 +28,7 @@ struct MiniRedisConfig {
   std::string aof_filename = "appendonly.aof";
   std::string log_level = "notice";
   std::string log_file;
+  size_t command_queue_capacity = 65536;
 
   // Persistence & Eviction (Phase 1+)
   size_t maxmemory = 0;

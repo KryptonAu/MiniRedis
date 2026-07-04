@@ -83,6 +83,8 @@ std::optional<std::string> ConfigManager::Get(std::string_view key) const {
   if (k == "aof_filename" || k == "appendfilename") return config_.aof_filename;
   if (k == "log_level") return config_.log_level;
   if (k == "log_file") return config_.log_file;
+  if (k == "command_queue_capacity")
+    return std::to_string(config_.command_queue_capacity);
 
   // Phase 1+ persistence/eviction config
   if (k == "maxmemory") return std::to_string(config_.maxmemory);
@@ -179,6 +181,12 @@ bool ConfigManager::Set(std::string_view key, std::string_view value) {
   }
   if (k == "log_file") {
     config_.log_file = v;
+    return true;
+  }
+  if (k == "command_queue_capacity") {
+    size_t val = 0;
+    if (!ParseInt<size_t>(v, val) || val == 0) return false;
+    config_.command_queue_capacity = val;
     return true;
   }
 
