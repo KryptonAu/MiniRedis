@@ -18,6 +18,16 @@ TEST(ListCommandsTest, RPopLPushMovesElementToDestination) {
             std::vector<std::string>({"b"}));
 }
 
+TEST(ListCommandsTest, RPopLPushSameKeyRotatesList) {
+  auto reg = CreateDefaultCommandRegistry();
+  CommandTestHarness h;
+
+  EXPECT_EQ(h.Call(reg, {"RPUSH", "list", "a", "b"}), ":2\r\n");
+  EXPECT_EQ(h.Call(reg, {"RPOPLPUSH", "list", "list"}), "$1\r\nb\r\n");
+  EXPECT_EQ(ParseBulkArray(h.Call(reg, {"LRANGE", "list", "0", "-1"})),
+            std::vector<std::string>({"b", "a"}));
+}
+
 TEST(ListCommandsTest, RPopLPushWrongTypeDestinationDoesNotPopSource) {
   auto reg = CreateDefaultCommandRegistry();
   CommandTestHarness h;

@@ -9,40 +9,25 @@ namespace miniredis {
 
 using Flag = CommandFlag;
 
-static SetValue* GetSet(CommandContext& ctx, std::string_view key) {
-  auto* v = ctx.db.Find(key);
-  return v ? std::get_if<SetValue>(v) : nullptr;
-}
-
-static bool IsSetWrongType(CommandContext& ctx, std::string_view key) {
-  auto* val = ctx.db.Find(key);
-  return val && !std::holds_alternative<SetValue>(*val);
-}
-
-static SetValue& GetOrCreateSet(CommandContext& ctx, std::string_view key) {
-  auto* v = ctx.db.Find(key);
-  if (!v) {
-    ctx.db.Set(key, MakeSetValue(ctx));
-    return std::get<SetValue>(*ctx.db.Find(key));
-  }
-  return std::get<SetValue>(*v);
+static SetValue& GetOrCreateSet(CommandContext& ctx, std::string_view key,
+                                TypedKeyLookup<SetValue>& lookup) {
+  return GetOrCreateValueAs<SetValue>(ctx.db, key, lookup,
+                                      [&ctx] { return MakeSetValue(ctx); });
 }
 
 static std::string SAddCmd(CommandContext& ctx, CommandArgs args) {
-  auto* val = ctx.db.Find(args[1]);
-  if (val && !std::holds_alternative<SetValue>(*val))
-    return RespReply::WrongType();
-  auto& sv = GetOrCreateSet(ctx, args[1]);
+  auto lookup = LookupKeyAs<SetValue>(ctx.db, args[1]);
+  if (lookup.WrongType()) return RespReply::WrongType();
+  auto& sv = GetOrCreateSet(ctx, args[1], lookup);
   int added = 0;
   for (size_t i = 2; i < args.size(); i++)
     if (sv.Add(args[i])) added++;
   return RespReply::Integer(added);
 }
 static std::string SRemCmd(CommandContext& ctx, CommandArgs args) {
-  auto* val_sr = ctx.db.Find(args[1]);
-  if (val_sr && !std::holds_alternative<SetValue>(*val_sr))
-    return RespReply::WrongType();
-  auto* sv = GetSet(ctx, args[1]);
+  auto lookup = LookupKeyAs<SetValue>(ctx.db, args[1]);
+  if (lookup.WrongType()) return RespReply::WrongType();
+  auto* sv = lookup.value;
   if (!sv) return RespReply::Integer(0);
   int removed = 0;
   for (size_t i = 2; i < args.size(); i++)
@@ -51,27 +36,29 @@ static std::string SRemCmd(CommandContext& ctx, CommandArgs args) {
   return RespReply::Integer(removed);
 }
 static std::string SMembersCmd(CommandContext& ctx, CommandArgs args) {
-  if (IsSetWrongType(ctx, args[1])) return RespReply::WrongType();
-  auto* sv = GetSet(ctx, args[1]);
+  auto lookup = LookupKeyAs<SetValue>(ctx.db, args[1]);
+  if (lookup.WrongType()) return RespReply::WrongType();
+  auto* sv = lookup.value;
   if (!sv) return RespReply::EmptyArray();
   return RespReply::ArrayOfBulkStrings(sv->Members());
 }
 static std::string SCardCmd(CommandContext& ctx, CommandArgs args) {
-  auto* val = ctx.db.Find(args[1]);
-  if (val && !std::holds_alternative<SetValue>(*val))
-    return RespReply::WrongType();
-  auto* sv = GetSet(ctx, args[1]);
+  auto lookup = LookupKeyAs<SetValue>(ctx.db, args[1]);
+  if (lookup.WrongType()) return RespReply::WrongType();
+  auto* sv = lookup.value;
   return RespReply::Integer(sv ? static_cast<int64_t>(sv->Size()) : 0);
 }
 static std::string SIsMemberCmd(CommandContext& ctx, CommandArgs args) {
-  if (IsSetWrongType(ctx, args[1])) return RespReply::WrongType();
-  auto* sv = GetSet(ctx, args[1]);
+  auto lookup = LookupKeyAs<SetValue>(ctx.db, args[1]);
+  if (lookup.WrongType()) return RespReply::WrongType();
+  auto* sv = lookup.value;
   return RespReply::Integer(sv && sv->Contains(args[2]) ? 1 : 0);
 }
 static std::string SPopCmd(CommandContext& ctx, CommandArgs args) {
   if (args.size() > 2) return Unsupported("SPOP count");
-  if (IsSetWrongType(ctx, args[1])) return RespReply::WrongType();
-  auto* sv = GetSet(ctx, args[1]);
+  auto lookup = LookupKeyAs<SetValue>(ctx.db, args[1]);
+  if (lookup.WrongType()) return RespReply::WrongType();
+  auto* sv = lookup.value;
   if (!sv) return RespReply::Nil();
   auto m = sv->Pop();
   if (!m) return RespReply::Nil();
@@ -80,8 +67,9 @@ static std::string SPopCmd(CommandContext& ctx, CommandArgs args) {
 }
 static std::string SRandMemberCmd(CommandContext& ctx, CommandArgs args) {
   if (args.size() > 2) return Unsupported("SRANDMEMBER count");
-  if (IsSetWrongType(ctx, args[1])) return RespReply::WrongType();
-  auto* sv = GetSet(ctx, args[1]);
+  auto lookup = LookupKeyAs<SetValue>(ctx.db, args[1]);
+  if (lookup.WrongType()) return RespReply::WrongType();
+  auto* sv = lookup.value;
   if (!sv) return RespReply::Nil();
   auto m = sv->RandomMember();
   return m ? RespReply::BulkString(*m) : RespReply::Nil();

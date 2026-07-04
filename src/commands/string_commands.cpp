@@ -1,5 +1,6 @@
 #include <chrono>
 #include <limits>
+#include <utility>
 
 #include "commands/command_context.h"
 #include "commands/command_helpers.h"
@@ -29,12 +30,29 @@ static bool CheckedExpireAtFromNow(int64_t duration_ms, int64_t& expire_at) {
   return true;
 }
 
+static StringValue& GetOrCreateString(CommandContext& ctx, std::string_view key,
+                                      TypedKeyLookup<StringValue>& lookup,
+                                      StringValue initial) {
+  return GetOrCreateValueAs<StringValue>(
+      ctx.db, key, lookup, [&initial]() mutable { return std::move(initial); });
+}
+
+static std::string IncrementStringBy(CommandContext& ctx, std::string_view key,
+                                     int64_t delta) {
+  auto lookup = LookupKeyAs<StringValue>(ctx.db, key);
+  if (lookup.WrongType()) return RespReply::WrongType();
+  auto& existing = GetOrCreateString(ctx, key, lookup, StringValue(0));
+  auto result = existing.IncrementBy(delta);
+  if (std::holds_alternative<TypeError>(result))
+    return TypeErrorToResp(std::get<TypeError>(result));
+  return RespReply::Integer(std::get<int64_t>(result));
+}
+
 static std::string GetCmd(CommandContext& ctx, CommandArgs args) {
-  auto* val = ctx.db.Find(args[1]);
-  if (!val) return RespReply::Nil();
-  auto* sv = std::get_if<StringValue>(val);
-  if (!sv) return RespReply::WrongType();
-  return RespReply::BulkString(sv->ToString());
+  auto lookup = LookupKeyAs<StringValue>(ctx.db, args[1]);
+  if (lookup.Missing()) return RespReply::Nil();
+  if (lookup.WrongType()) return RespReply::WrongType();
+  return RespReply::BulkString(lookup.value->ToString());
 }
 
 static std::string SetCmd(CommandContext& ctx, CommandArgs args) {
@@ -76,68 +94,62 @@ static std::string PSetExCmd(CommandContext& ctx, CommandArgs args) {
 }
 
 static std::string GetSetCmd(CommandContext& ctx, CommandArgs args) {
-  auto* val = ctx.db.Find(args[1]);
+  auto lookup = LookupKeyAs<StringValue>(ctx.db, args[1]);
   std::string old;
-  if (val) {
-    auto* sv = std::get_if<StringValue>(val);
-    if (!sv) return RespReply::WrongType();
-    old = sv->ToString();
+  if (!lookup.Missing()) {
+    if (lookup.WrongType()) return RespReply::WrongType();
+    old = lookup.value->ToString();
   }
   ctx.db.Set(args[1], StringValue(args[2]));
-  if (val) return RespReply::BulkString(old);
+  if (!lookup.Missing()) return RespReply::BulkString(old);
   return RespReply::Nil();
 }
 
 static std::string GetDelCmd(CommandContext& ctx, CommandArgs args) {
-  auto* val = ctx.db.Find(args[1]);
-  if (!val) return RespReply::Nil();
-  auto* sv = std::get_if<StringValue>(val);
-  if (!sv) return RespReply::WrongType();
-  std::string old = sv->ToString();
+  auto lookup = LookupKeyAs<StringValue>(ctx.db, args[1]);
+  if (lookup.Missing()) return RespReply::Nil();
+  if (lookup.WrongType()) return RespReply::WrongType();
+  std::string old = lookup.value->ToString();
   ctx.db.Delete(args[1]);
   return RespReply::BulkString(old);
 }
 
 static std::string GetExCmd(CommandContext& ctx, CommandArgs args) {
-  auto* val = ctx.db.Find(args[1]);
-  if (!val) return RespReply::Nil();
-  auto* sv = std::get_if<StringValue>(val);
-  if (!sv) return RespReply::WrongType();
-  return RespReply::BulkString(sv->ToString());
+  auto lookup = LookupKeyAs<StringValue>(ctx.db, args[1]);
+  if (lookup.Missing()) return RespReply::Nil();
+  if (lookup.WrongType()) return RespReply::WrongType();
+  return RespReply::BulkString(lookup.value->ToString());
 }
 
 static std::string AppendCmd(CommandContext& ctx, CommandArgs args) {
-  auto* val = ctx.db.Find(args[1]);
-  if (!val) {
-    ctx.db.Set(args[1], StringValue(args[2]));
+  auto lookup = LookupKeyAs<StringValue>(ctx.db, args[1]);
+  if (lookup.WrongType()) return RespReply::WrongType();
+  if (lookup.Missing()) {
+    GetOrCreateString(ctx, args[1], lookup, StringValue(args[2]));
     return RespReply::Integer(static_cast<int64_t>(args[2].size()));
   }
-  auto* sv = std::get_if<StringValue>(val);
-  if (!sv) return RespReply::WrongType();
-  sv->Append(args[2]);
-  return RespReply::Integer(static_cast<int64_t>(sv->Length()));
+  lookup.value->Append(args[2]);
+  return RespReply::Integer(static_cast<int64_t>(lookup.value->Length()));
 }
 
 static std::string StrlenCmd(CommandContext& ctx, CommandArgs args) {
-  auto* val = ctx.db.Find(args[1]);
-  if (!val) return RespReply::Integer(0);
-  auto* sv = std::get_if<StringValue>(val);
-  if (!sv) return RespReply::WrongType();
-  return RespReply::Integer(static_cast<int64_t>(sv->Length()));
+  auto lookup = LookupKeyAs<StringValue>(ctx.db, args[1]);
+  if (lookup.Missing()) return RespReply::Integer(0);
+  if (lookup.WrongType()) return RespReply::WrongType();
+  return RespReply::Integer(static_cast<int64_t>(lookup.value->Length()));
 }
 
 static std::string GetRangeCmd(CommandContext& ctx, CommandArgs args) {
-  auto* val = ctx.db.Find(args[1]);
-  if (!val) return RespReply::BulkString("");
-  auto* sv = std::get_if<StringValue>(val);
-  if (!sv) return RespReply::WrongType();
+  auto lookup = LookupKeyAs<StringValue>(ctx.db, args[1]);
+  if (lookup.Missing()) return RespReply::BulkString("");
+  if (lookup.WrongType()) return RespReply::WrongType();
   auto p1 = ParseCanonicalInt(args[2]);
   auto p2 = ParseCanonicalInt(args[3]);
   if (!std::holds_alternative<ParsedInt>(p1) ||
       !std::holds_alternative<ParsedInt>(p2))
     return InvalidInteger();
-  return RespReply::BulkString(sv->GetRange(std::get<ParsedInt>(p1).value,
-                                            std::get<ParsedInt>(p2).value));
+  return RespReply::BulkString(lookup.value->GetRange(
+      std::get<ParsedInt>(p1).value, std::get<ParsedInt>(p2).value));
 }
 
 static std::string SetRangeCmd(CommandContext& ctx, CommandArgs args) {
@@ -145,81 +157,33 @@ static std::string SetRangeCmd(CommandContext& ctx, CommandArgs args) {
   if (!std::holds_alternative<ParsedInt>(parsed)) return InvalidInteger();
   int64_t offset = std::get<ParsedInt>(parsed).value;
   if (offset < 0) return RespReply::Error("ERR offset is out of range");
-  auto* val = ctx.db.Find(args[1]);
-  if (!val) {
-    StringValue sv("");
-    sv.SetRange(static_cast<size_t>(offset), args[3]);
-    ctx.db.Set(args[1], std::move(sv));
-    auto* nv = ctx.db.Find(args[1]);
-    auto* nsv = nv ? std::get_if<StringValue>(nv) : nullptr;
-    return RespReply::Integer(static_cast<int64_t>(nsv ? nsv->Length() : 0));
-  }
-  auto* sv = std::get_if<StringValue>(val);
-  if (!sv) return RespReply::WrongType();
-  sv->SetRange(static_cast<size_t>(offset), args[3]);
-  return RespReply::Integer(static_cast<int64_t>(sv->Length()));
+  auto lookup = LookupKeyAs<StringValue>(ctx.db, args[1]);
+  if (lookup.WrongType()) return RespReply::WrongType();
+  auto& sv = GetOrCreateString(ctx, args[1], lookup, StringValue(""));
+  sv.SetRange(static_cast<size_t>(offset), args[3]);
+  return RespReply::Integer(static_cast<int64_t>(sv.Length()));
 }
 
 static std::string IncrCmd(CommandContext& ctx, CommandArgs args) {
-  auto* val = ctx.db.Find(args[1]);
-  if (!val) {
-    ctx.db.Set(args[1], StringValue(0));
-    val = ctx.db.Find(args[1]);
-  }
-  auto* existing = std::get_if<StringValue>(val);
-  if (!existing) return RespReply::WrongType();
-  auto result = existing->IncrementBy(1);
-  if (std::holds_alternative<TypeError>(result))
-    return TypeErrorToResp(std::get<TypeError>(result));
-  return RespReply::Integer(std::get<int64_t>(result));
+  return IncrementStringBy(ctx, args[1], 1);
 }
 
 static std::string DecrCmd(CommandContext& ctx, CommandArgs args) {
-  auto* val = ctx.db.Find(args[1]);
-  if (!val) {
-    ctx.db.Set(args[1], StringValue(0));
-    val = ctx.db.Find(args[1]);
-  }
-  auto* existing = std::get_if<StringValue>(val);
-  if (!existing) return RespReply::WrongType();
-  auto result = existing->IncrementBy(-1);
-  if (std::holds_alternative<TypeError>(result))
-    return TypeErrorToResp(std::get<TypeError>(result));
-  return RespReply::Integer(std::get<int64_t>(result));
+  return IncrementStringBy(ctx, args[1], -1);
 }
 
 static std::string IncrByCmd(CommandContext& ctx, CommandArgs args) {
   auto parsed = ParseCanonicalInt(args[2]);
   if (!std::holds_alternative<ParsedInt>(parsed)) return InvalidInteger();
   int64_t delta = std::get<ParsedInt>(parsed).value;
-  auto* val = ctx.db.Find(args[1]);
-  if (!val) {
-    ctx.db.Set(args[1], StringValue(0));
-    val = ctx.db.Find(args[1]);
-  }
-  auto* existing = std::get_if<StringValue>(val);
-  if (!existing) return RespReply::WrongType();
-  auto result = existing->IncrementBy(delta);
-  if (std::holds_alternative<TypeError>(result))
-    return TypeErrorToResp(std::get<TypeError>(result));
-  return RespReply::Integer(std::get<int64_t>(result));
+  return IncrementStringBy(ctx, args[1], delta);
 }
 
 static std::string DecrByCmd(CommandContext& ctx, CommandArgs args) {
   auto parsed = ParseCanonicalInt(args[2]);
   if (!std::holds_alternative<ParsedInt>(parsed)) return InvalidInteger();
   int64_t delta = -std::get<ParsedInt>(parsed).value;
-  auto* val = ctx.db.Find(args[1]);
-  if (!val) {
-    ctx.db.Set(args[1], StringValue(0));
-    val = ctx.db.Find(args[1]);
-  }
-  auto* existing = std::get_if<StringValue>(val);
-  if (!existing) return RespReply::WrongType();
-  auto result = existing->IncrementBy(delta);
-  if (std::holds_alternative<TypeError>(result))
-    return TypeErrorToResp(std::get<TypeError>(result));
-  return RespReply::Integer(std::get<int64_t>(result));
+  return IncrementStringBy(ctx, args[1], delta);
 }
 
 static std::string IncrByFloatCmd(CommandContext& ctx, CommandArgs args) {
@@ -227,29 +191,24 @@ static std::string IncrByFloatCmd(CommandContext& ctx, CommandArgs args) {
   if (std::holds_alternative<TypeError>(parsed))
     return TypeErrorToResp(std::get<TypeError>(parsed));
   double delta = std::get<double>(parsed);
-  auto* val = ctx.db.Find(args[1]);
-  if (!val) {
-    ctx.db.Set(args[1], StringValue(0));
-    val = ctx.db.Find(args[1]);
-  }
-  auto* existing = std::get_if<StringValue>(val);
-  if (!existing) return RespReply::WrongType();
-  auto result = existing->IncrementByFloat(delta);
+  auto lookup = LookupKeyAs<StringValue>(ctx.db, args[1]);
+  if (lookup.WrongType()) return RespReply::WrongType();
+  auto& existing = GetOrCreateString(ctx, args[1], lookup, StringValue(0));
+  auto result = existing.IncrementByFloat(delta);
   if (std::holds_alternative<TypeError>(result))
     return TypeErrorToResp(std::get<TypeError>(result));
-  return RespReply::BulkString(existing->ToString());
+  return RespReply::BulkString(existing.ToString());
 }
 
 static std::string MGetCmd(CommandContext& ctx, CommandArgs args) {
   std::string result;
   RespReply::AppendArrayHeader(result, args.size() - 1);
   for (size_t i = 1; i < args.size(); i++) {
-    auto* val = ctx.db.Find(args[i]);
-    if (!val || !std::holds_alternative<StringValue>(*val)) {
+    auto lookup = LookupKeyAs<StringValue>(ctx.db, args[i]);
+    if (!lookup.value) {
       RespReply::AppendNullBulkString(result);
     } else {
-      RespReply::AppendBulkString(result,
-                                  std::get<StringValue>(*val).ToString());
+      RespReply::AppendBulkString(result, lookup.value->ToString());
     }
   }
   return result;

@@ -10,44 +10,34 @@ namespace miniredis {
 
 using Flag = CommandFlag;
 
-static HashValue* GetHash(CommandContext& ctx, std::string_view key) {
-  auto* v = ctx.db.Find(key);
-  return v ? std::get_if<HashValue>(v) : nullptr;
-}
-static HashValue& GetOrCreateHash(CommandContext& ctx, std::string_view key) {
-  auto* v = ctx.db.Find(key);
-  if (!v) {
-    ctx.db.Set(key, MakeHashValue(ctx));
-    return std::get<HashValue>(*ctx.db.Find(key));
-  }
-  return std::get<HashValue>(*v);
+static HashValue& GetOrCreateHash(CommandContext& ctx, std::string_view key,
+                                  TypedKeyLookup<HashValue>& lookup) {
+  return GetOrCreateValueAs<HashValue>(ctx.db, key, lookup,
+                                       [&ctx] { return MakeHashValue(ctx); });
 }
 
 static std::string HSetCmd(CommandContext& ctx, CommandArgs args) {
   if ((args.size() - 2) % 2 != 0) return WrongArity("HSET");
-  auto* val = ctx.db.Find(args[1]);
-  if (val && !std::holds_alternative<HashValue>(*val))
-    return RespReply::WrongType();
-  auto& hv = GetOrCreateHash(ctx, args[1]);
+  auto lookup = LookupKeyAs<HashValue>(ctx.db, args[1]);
+  if (lookup.WrongType()) return RespReply::WrongType();
+  auto& hv = GetOrCreateHash(ctx, args[1], lookup);
   int created = 0;
   for (size_t i = 2; i + 1 < args.size(); i += 2)
     if (hv.Set(args[i], args[i + 1])) created++;
   return RespReply::Integer(created);
 }
 static std::string HGetCmd(CommandContext& ctx, CommandArgs args) {
-  auto* val = ctx.db.Find(args[1]);
-  if (val && !std::holds_alternative<HashValue>(*val))
-    return RespReply::WrongType();
-  auto* hv = GetHash(ctx, args[1]);
+  auto lookup = LookupKeyAs<HashValue>(ctx.db, args[1]);
+  if (lookup.WrongType()) return RespReply::WrongType();
+  auto* hv = lookup.value;
   if (!hv) return RespReply::Nil();
   auto v = hv->Get(args[2]);
   return v ? RespReply::BulkString(*v) : RespReply::Nil();
 }
 static std::string HDelCmd(CommandContext& ctx, CommandArgs args) {
-  auto* val = ctx.db.Find(args[1]);
-  if (val && !std::holds_alternative<HashValue>(*val))
-    return RespReply::WrongType();
-  auto* hv = GetHash(ctx, args[1]);
+  auto lookup = LookupKeyAs<HashValue>(ctx.db, args[1]);
+  if (lookup.WrongType()) return RespReply::WrongType();
+  auto* hv = lookup.value;
   if (!hv) return RespReply::Integer(0);
   int deleted = 0;
   for (size_t i = 2; i < args.size(); i++)
@@ -56,40 +46,35 @@ static std::string HDelCmd(CommandContext& ctx, CommandArgs args) {
   return RespReply::Integer(deleted);
 }
 static std::string HLenCmd(CommandContext& ctx, CommandArgs args) {
-  auto* val = ctx.db.Find(args[1]);
-  if (val && !std::holds_alternative<HashValue>(*val))
-    return RespReply::WrongType();
-  auto* hv = GetHash(ctx, args[1]);
+  auto lookup = LookupKeyAs<HashValue>(ctx.db, args[1]);
+  if (lookup.WrongType()) return RespReply::WrongType();
+  auto* hv = lookup.value;
   return RespReply::Integer(hv ? static_cast<int64_t>(hv->Size()) : 0);
 }
 static std::string HExistsCmd(CommandContext& ctx, CommandArgs args) {
-  auto* val = ctx.db.Find(args[1]);
-  if (val && !std::holds_alternative<HashValue>(*val))
-    return RespReply::WrongType();
-  auto* hv = GetHash(ctx, args[1]);
+  auto lookup = LookupKeyAs<HashValue>(ctx.db, args[1]);
+  if (lookup.WrongType()) return RespReply::WrongType();
+  auto* hv = lookup.value;
   return RespReply::Integer(hv && hv->Exists(args[2]) ? 1 : 0);
 }
 static std::string HKeysCmd(CommandContext& ctx, CommandArgs args) {
-  auto* val = ctx.db.Find(args[1]);
-  if (val && !std::holds_alternative<HashValue>(*val))
-    return RespReply::WrongType();
-  auto* hv = GetHash(ctx, args[1]);
+  auto lookup = LookupKeyAs<HashValue>(ctx.db, args[1]);
+  if (lookup.WrongType()) return RespReply::WrongType();
+  auto* hv = lookup.value;
   if (!hv) return RespReply::EmptyArray();
   return RespReply::ArrayOfBulkStrings(hv->Keys());
 }
 static std::string HValsCmd(CommandContext& ctx, CommandArgs args) {
-  auto* val = ctx.db.Find(args[1]);
-  if (val && !std::holds_alternative<HashValue>(*val))
-    return RespReply::WrongType();
-  auto* hv = GetHash(ctx, args[1]);
+  auto lookup = LookupKeyAs<HashValue>(ctx.db, args[1]);
+  if (lookup.WrongType()) return RespReply::WrongType();
+  auto* hv = lookup.value;
   if (!hv) return RespReply::EmptyArray();
   return RespReply::ArrayOfBulkStrings(hv->Values());
 }
 static std::string HGetAllCmd(CommandContext& ctx, CommandArgs args) {
-  auto* val = ctx.db.Find(args[1]);
-  if (val && !std::holds_alternative<HashValue>(*val))
-    return RespReply::WrongType();
-  auto* hv = GetHash(ctx, args[1]);
+  auto lookup = LookupKeyAs<HashValue>(ctx.db, args[1]);
+  if (lookup.WrongType()) return RespReply::WrongType();
+  auto* hv = lookup.value;
   if (!hv) return RespReply::EmptyArray();
   auto all = hv->GetAll();
   std::vector<std::string> flat;
@@ -100,12 +85,11 @@ static std::string HGetAllCmd(CommandContext& ctx, CommandArgs args) {
   return RespReply::ArrayOfBulkStrings(flat);
 }
 static std::string HIncrByCmd(CommandContext& ctx, CommandArgs args) {
-  auto* val = ctx.db.Find(args[1]);
-  if (val && !std::holds_alternative<HashValue>(*val))
-    return RespReply::WrongType();
+  auto lookup = LookupKeyAs<HashValue>(ctx.db, args[1]);
+  if (lookup.WrongType()) return RespReply::WrongType();
   auto p = ParseCanonicalInt(args[3]);
   if (!std::holds_alternative<ParsedInt>(p)) return InvalidInteger();
-  auto& hv = GetOrCreateHash(ctx, args[1]);
+  auto& hv = GetOrCreateHash(ctx, args[1], lookup);
   auto r = hv.IncrementBy(args[2], std::get<ParsedInt>(p).value);
   if (std::holds_alternative<TypeError>(r))
     return TypeErrorToResp(std::get<TypeError>(r));

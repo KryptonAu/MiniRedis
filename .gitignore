@@ -80,6 +80,8 @@ Testing/
 # Agent
 .agents/
 .codex/
+.reasonix/
+reasonix.toml
 
 #benchmark
 benchmarks/
