@@ -1,13 +1,29 @@
 #include "types/type_conversion.h"
 
+#include <string>
+#include <string_view>
+
 #include "types/numeric_parse.h"
 
 namespace miniredis {
+namespace {
+
+std::string_view ListpackValueView(const ds::Listpack::Value& value,
+                                   std::string& storage) {
+  if (value.type == ds::Listpack::Value::Type::kString) {
+    return value.string;
+  }
+  storage = std::to_string(value.integer);
+  return storage;
+}
+
+}  // namespace
 
 SetHashtable IntsetToSetHashtable(const ds::Intset& intset) {
   SetHashtable ht;
-  for (auto v : intset.Values()) {
-    ht.Add(std::to_string(v), std::monostate{});
+  for (size_t i = 0; i < intset.Size(); i++) {
+    auto value = intset.Get(i);
+    if (value) ht.Add(std::to_string(*value), std::monostate{});
   }
   return ht;
 }
@@ -23,7 +39,8 @@ HashHashtable ListpackToHashDict(const ds::Listpack& lp) {
     if (it == end) break;
     auto value = *it;
     ++it;
-    ht.Set(field.ToString(), value.ToString());
+    std::string field_storage;
+    ht.SetView(ListpackValueView(field, field_storage), value.ToString());
   }
   return ht;
 }
@@ -45,7 +62,8 @@ ZSetSkiplist ListpackToZSetSkiplist(ds::Listpack&& lp) {
     if (std::holds_alternative<double>(parsed)) {
       score = std::get<double>(parsed);
     }
-    zs.skiplist.Insert(score, ele.ToString());
+    std::string ele_storage;
+    zs.skiplist.InsertView(score, ListpackValueView(ele, ele_storage));
   }
   zs.RebuildDict();
   return zs;
@@ -71,7 +89,7 @@ void ZSetSkiplist::RebuildDict() {
   dict.Clear();
   auto* node = skiplist.First();
   while (node) {
-    dict.Set(node->key, node);
+    dict.SetView(node->key, node);
     node = node->levels[0].forward;
   }
 }

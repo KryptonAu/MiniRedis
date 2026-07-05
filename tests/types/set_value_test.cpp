@@ -2,6 +2,9 @@
 
 #include <gtest/gtest.h>
 
+#include <string>
+#include <string_view>
+
 namespace miniredis {
 namespace {
 
@@ -83,6 +86,31 @@ TEST(SetValueTest, Pop) {
   auto popped = sv.Pop();
   ASSERT_TRUE(popped.has_value());
   EXPECT_EQ(sv.Size(), 1);
+}
+
+TEST(SetValueTest, HashtableEncodingAcceptsSubviewMembers) {
+  EncodingThresholds thresh;
+  thresh.set_max_intset_entries = 512;
+  SetValue sv(thresh);
+  EXPECT_TRUE(sv.Add("1"));
+
+  std::string member_source = "__alpha__";
+  std::string_view member(member_source.data() + 2, 5);
+  EXPECT_TRUE(sv.Add(member));
+  ASSERT_EQ(sv.Encoding(), ValueEncoding::kHashtable);
+  member_source[2] = 'X';
+
+  std::string lookup_source = "zzalphazz";
+  std::string_view lookup(lookup_source.data() + 2, 5);
+  EXPECT_TRUE(sv.Contains(lookup));
+  EXPECT_TRUE(sv.Contains("1"));
+  EXPECT_FALSE(sv.Add(lookup));
+
+  std::string remove_source = "qqalphaqq";
+  std::string_view remove_member(remove_source.data() + 2, 5);
+  EXPECT_TRUE(sv.Remove(remove_member));
+  EXPECT_FALSE(sv.Contains(lookup));
+  EXPECT_TRUE(sv.Contains("1"));
 }
 
 }  // namespace

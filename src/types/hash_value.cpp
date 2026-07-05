@@ -20,7 +20,7 @@ bool HashValue::Set(std::string_view field, std::string_view value) {
           ConvertToHashtable();
           // Re-do the set with new encoding
           auto& ht = std::get<Hashtable>(encoding_);
-          ht.Set(std::string(field), std::string(value));
+          ht.SetView(field, std::string(value));
           return false;
         }
         lp->Replace(i + 1, value);
@@ -40,8 +40,8 @@ bool HashValue::Set(std::string_view field, std::string_view value) {
 
   // Dict encoding
   auto& ht = std::get<Hashtable>(encoding_);
-  bool existed = ht.Find(std::string(field)) != nullptr;
-  ht.Set(std::string(field), std::string(value));
+  bool existed = ht.FindView(field) != nullptr;
+  ht.SetView(field, std::string(value));
   return !existed;
 }
 
@@ -63,7 +63,7 @@ std::optional<std::string> HashValue::Get(std::string_view field) const {
     }
     return std::nullopt;
   }
-  const auto* val = std::get<Hashtable>(encoding_).Find(std::string(field));
+  const auto* val = std::get<Hashtable>(encoding_).FindView(field);
   if (val) return *val;
   return std::nullopt;
 }
@@ -80,7 +80,7 @@ bool HashValue::Delete(std::string_view field) {
     }
     return false;
   }
-  return std::get<Hashtable>(encoding_).Delete(std::string(field));
+  return std::get<Hashtable>(encoding_).DeleteView(field);
 }
 
 bool HashValue::Exists(std::string_view field) const {

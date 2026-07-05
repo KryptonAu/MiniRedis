@@ -297,6 +297,32 @@ TEST(ZSetValueTest, SkiplistEncodingAcceptsSubviewElements) {
   EXPECT_FALSE(zs.Score(alpha_lookup).has_value());
 }
 
+TEST(ZSetValueTest, ListpackToSkiplistConversionAcceptsSubviewElements) {
+  EncodingThresholds t;
+  t.zset_max_listpack_entries = 2;
+  ZSetValue zs(t);
+
+  std::string insert_source = "__alpha__";
+  std::string_view alpha(insert_source.data() + 2, 5);
+  ASSERT_TRUE(std::holds_alternative<bool>(zs.Add(alpha, 1.5)));
+  insert_source[2] = 'X';
+  zs.Add("beta", 0.5);
+  zs.Add("gamma", 2.5);
+  ASSERT_EQ(zs.Encoding(), ValueEncoding::kSkiplist);
+
+  std::string lookup_source = "zzalphazz";
+  std::string_view alpha_lookup(lookup_source.data() + 2, 5);
+  ASSERT_TRUE(zs.Score(alpha_lookup).has_value());
+  EXPECT_DOUBLE_EQ(zs.Score(alpha_lookup).value(), 1.5);
+  ASSERT_TRUE(zs.Rank(alpha_lookup).has_value());
+  EXPECT_EQ(zs.Rank(alpha_lookup).value(), 1);
+
+  std::string remove_source = "qqalphaqq";
+  std::string_view alpha_remove(remove_source.data() + 2, 5);
+  EXPECT_TRUE(zs.Remove(alpha_remove));
+  EXPECT_FALSE(zs.Score(alpha_lookup).has_value());
+}
+
 // RevRange(1, -1) should skip max element
 TEST(ZSetValueTest, RevRangeSkipFirst) {
   ZSetValue zs;

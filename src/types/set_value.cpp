@@ -17,7 +17,7 @@ bool SetValue::Add(std::string_view member) {
       if (!is->Add(v)) return false;
     } else {
       Hashtable ht = IntsetToSetHashtable(*is);
-      ht.Add(std::string(member), {});
+      ht.AddView(member, {});
       encoding_ = std::move(ht);
       return true;
     }
@@ -25,7 +25,7 @@ bool SetValue::Add(std::string_view member) {
     return true;
   }
   auto& ht = std::get<Hashtable>(encoding_);
-  return ht.Add(std::string(member), {});
+  return ht.AddView(member, {});
 }
 
 bool SetValue::Remove(std::string_view member) {
@@ -36,8 +36,7 @@ bool SetValue::Remove(std::string_view member) {
     }
     return false;
   }
-  std::string key(member);
-  return std::get<Hashtable>(encoding_).Delete(key);
+  return std::get<Hashtable>(encoding_).DeleteView(member);
 }
 
 bool SetValue::Contains(std::string_view member) const {
@@ -48,8 +47,7 @@ bool SetValue::Contains(std::string_view member) const {
     }
     return false;
   }
-  std::string key(member);
-  return std::get<Hashtable>(encoding_).Find(key) != nullptr;
+  return std::get<Hashtable>(encoding_).FindView(member) != nullptr;
 }
 
 std::optional<std::string> SetValue::Pop() {

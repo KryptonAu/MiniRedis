@@ -472,7 +472,7 @@ size_t ZSetValue::RemoveRangeByRank(long long start, long long stop) {
   auto& zs = std::get<ZSetSkiplist>(encoding_);
   return zs.skiplist.DeleteRangeByRank(
       static_cast<size_t>(start + 1), static_cast<size_t>(stop + 1),
-      [&](const std::string& key, double) { zs.dict.Delete(key); });
+      [&](const std::string& key, double) { zs.dict.DeleteView(key); });
 }
 
 size_t ZSetValue::RemoveRangeByScore(double min, double max, bool min_ex,
@@ -513,7 +513,7 @@ size_t ZSetValue::RemoveRangeByScore(double min, double max, bool min_ex,
   typename ds::Skiplist<std::string, double>::RangeSpec spec{min, max, min_ex,
                                                              max_ex};
   return zs.skiplist.DeleteRangeByScore(
-      spec, [&](const std::string& key, double) { zs.dict.Delete(key); });
+      spec, [&](const std::string& key, double) { zs.dict.DeleteView(key); });
 }
 
 size_t ZSetValue::RemoveRangeByLex(std::string_view min, std::string_view max,
@@ -547,7 +547,7 @@ size_t ZSetValue::RemoveRangeByLex(std::string_view min, std::string_view max,
     if (min_ex ? node->key <= min : node->key < min) in_range = false;
     if (max_ex ? node->key >= max : node->key > max) in_range = false;
     if (in_range) {
-      zs.dict.Delete(node->key);
+      zs.dict.DeleteView(node->key);
       zs.skiplist.DeleteNode(node);
       removed++;
     }

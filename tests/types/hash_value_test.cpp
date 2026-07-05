@@ -2,6 +2,9 @@
 
 #include <gtest/gtest.h>
 
+#include <string>
+#include <string_view>
+
 namespace miniredis {
 namespace {
 
@@ -88,6 +91,34 @@ TEST(HashValueTest, UpdateFieldWithLongValueTriggersUpgrade) {
   hv.Set("key", std::string(20, 'x'));
   EXPECT_EQ(hv.Encoding(), ValueEncoding::kHashHT);
   EXPECT_EQ(hv.Get("key").value(), std::string(20, 'x'));
+}
+
+TEST(HashValueTest, HashtableEncodingAcceptsSubviewFields) {
+  EncodingThresholds t;
+  t.hash_max_listpack_entries = 1;
+  HashValue hv(t);
+  hv.Set("seed", "0");
+
+  std::string field_source = "__alpha__";
+  std::string_view field(field_source.data() + 2, 5);
+  EXPECT_TRUE(hv.Set(field, "1"));
+  ASSERT_EQ(hv.Encoding(), ValueEncoding::kHashHT);
+  field_source[2] = 'X';
+
+  std::string lookup_source = "zzalphazz";
+  std::string_view lookup(lookup_source.data() + 2, 5);
+  EXPECT_TRUE(hv.Exists(lookup));
+  ASSERT_TRUE(hv.Get(lookup).has_value());
+  EXPECT_EQ(hv.Get(lookup).value(), "1");
+
+  EXPECT_FALSE(hv.Set(lookup, "2"));
+  ASSERT_TRUE(hv.Get(lookup).has_value());
+  EXPECT_EQ(hv.Get(lookup).value(), "2");
+
+  std::string delete_source = "qqalphaqq";
+  std::string_view delete_field(delete_source.data() + 2, 5);
+  EXPECT_TRUE(hv.Delete(delete_field));
+  EXPECT_FALSE(hv.Exists(lookup));
 }
 
 }  // namespace
