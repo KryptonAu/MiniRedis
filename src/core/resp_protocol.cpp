@@ -46,15 +46,8 @@ void AppendInt64(std::string& out, int64_t value) {
 
 RespCommand::RespCommand() = default;
 
-RespCommand::RespCommand(std::shared_ptr<const std::string> storage,
-                         std::vector<ArgSpan> spans)
-    : storage_(std::move(storage)) {
-  args_.reserve(spans.size());
-  const char* base = storage_->data();
-  for (const auto& span : spans) {
-    args_.emplace_back(base + span.offset, span.length);
-  }
-}
+RespCommand::RespCommand(std::vector<std::string_view> args)
+    : args_(std::move(args)) {}
 
 std::span<const std::string_view> RespCommand::Args() const { return args_; }
 
@@ -79,68 +72,42 @@ std::vector<std::string> RespCommand::ToOwnedVector() const {
 
 RespParser::RespParser() = default;
 
-ParseStatus RespParser::Feed(std::string_view data) {
-  if (!error_.empty()) return ParseStatus::kError;
+RespParseResult RespParser::ParseNext(std::string_view readable) {
+  RespParseResult result;
+  if (!error_.empty()) {
+    result.status = ParseStatus::kError;
+    return result;
+  }
+  if (readable.empty()) return result;
 
-  buffer_.append(data);
   size_t pos = 0;
-  size_t last_complete_pos = 0;
-  bool any_complete = false;
-  std::vector<ParsedCommand> parsed_commands;
-
-  while (pos < buffer_.size()) {
-    ParsedCommand command;
-    auto status = ParseOneAt(pos, command);
-    if (status == ParseStatus::kError) {
-      CommitParsedCommands(std::move(parsed_commands), last_complete_pos);
-      return ParseStatus::kError;
-    }
-    if (status == ParseStatus::kIncomplete) break;
-    last_complete_pos = pos;
-    parsed_commands.push_back(std::move(command));
-    any_complete = true;
+  ParsedCommand parsed;
+  result.status = ParseOneAt(readable, pos, parsed);
+  if (result.status == ParseStatus::kComplete) {
+    result.consumed = pos;
+    result.command = RespCommand(std::move(parsed.args));
   }
 
-  CommitParsedCommands(std::move(parsed_commands), last_complete_pos);
-
-  return any_complete ? ParseStatus::kComplete : ParseStatus::kIncomplete;
+  return result;
 }
 
-bool RespParser::HasCommand() const { return !ready_commands_.empty(); }
-
-size_t RespParser::PendingCommandCount() const {
-  return ready_commands_.size();
-}
-
-RespCommand RespParser::TakeCommand() {
-  if (ready_commands_.empty()) return {};
-  auto cmd = std::move(ready_commands_.front());
-  ready_commands_.pop_front();
-  return cmd;
-}
-
-void RespParser::Reset() {
-  buffer_.clear();
-  ready_commands_.clear();
-  error_.clear();
-}
+void RespParser::Reset() { error_.clear(); }
 
 std::optional<std::string_view> RespParser::LastError() const {
   if (error_.empty()) return std::nullopt;
   return error_;
 }
 
-size_t RespParser::BufferSize() const { return buffer_.size(); }
-
-ParseStatus RespParser::ParseOneAt(size_t& pos, ParsedCommand& command) {
+ParseStatus RespParser::ParseOneAt(std::string_view readable, size_t& pos,
+                                   ParsedCommand& command) {
   size_t start = pos;
-  if (pos >= buffer_.size()) {
+  if (pos >= readable.size()) {
     pos = start;
     return ParseStatus::kIncomplete;
   }
-  if (buffer_[pos] != '*') {
+  if (readable[pos] != '*') {
     error_ = "Expected '*' for array, got " +
-             std::to_string(static_cast<unsigned char>(buffer_[pos]));
+             std::to_string(static_cast<unsigned char>(readable[pos]));
     return ParseStatus::kError;
   }
   pos++;
@@ -149,8 +116,8 @@ ParseStatus RespParser::ParseOneAt(size_t& pos, ParsedCommand& command) {
   static constexpr int64_t kMaxArrayLen = 1024 * 1024;
   int64_t array_len = 0;
   bool negative = false;
-  while (pos < buffer_.size() && buffer_[pos] != '\r') {
-    char c = static_cast<char>(buffer_[pos]);
+  while (pos < readable.size() && readable[pos] != '\r') {
+    char c = static_cast<char>(readable[pos]);
     if (c == '-') {
       negative = true;
       pos++;
@@ -171,8 +138,8 @@ ParseStatus RespParser::ParseOneAt(size_t& pos, ParsedCommand& command) {
     }
     pos++;
   }
-  if (pos + 1 >= buffer_.size() || buffer_[pos] != '\r' ||
-      buffer_[pos + 1] != '\n') {
+  if (pos + 1 >= readable.size() || readable[pos] != '\r' ||
+      readable[pos + 1] != '\n') {
     pos = start;
     return ParseStatus::kIncomplete;
   }
@@ -190,13 +157,13 @@ ParseStatus RespParser::ParseOneAt(size_t& pos, ParsedCommand& command) {
   // Parse array elements
   command.args.reserve(static_cast<size_t>(array_len));
   for (int64_t i = 0; i < array_len; i++) {
-    if (pos >= buffer_.size()) {
+    if (pos >= readable.size()) {
       pos = start;
       return ParseStatus::kIncomplete;
     }
 
     // Must be bulk string ($)
-    if (buffer_[pos] != '$') {
+    if (readable[pos] != '$') {
       error_ = "Expected '$' for bulk string";
       return ParseStatus::kError;
     }
@@ -206,8 +173,8 @@ ParseStatus RespParser::ParseOneAt(size_t& pos, ParsedCommand& command) {
     static constexpr int64_t kMaxBulkLen = 512LL * 1024 * 1024;  // 512MB
     int64_t bulk_len = 0;
     bool bulk_null = false;
-    while (pos < buffer_.size() && buffer_[pos] != '\r') {
-      char c = static_cast<char>(buffer_[pos]);
+    while (pos < readable.size() && readable[pos] != '\r') {
+      char c = static_cast<char>(readable[pos]);
       if (c == '-') {
         bulk_null = true;
         pos++;
@@ -228,8 +195,8 @@ ParseStatus RespParser::ParseOneAt(size_t& pos, ParsedCommand& command) {
       }
       pos++;
     }
-    if (pos + 1 >= buffer_.size() || buffer_[pos] != '\r' ||
-        buffer_[pos + 1] != '\n') {
+    if (pos + 1 >= readable.size() || readable[pos] != '\r' ||
+        readable[pos + 1] != '\n') {
       pos = start;
       return ParseStatus::kIncomplete;
     }
@@ -241,14 +208,14 @@ ParseStatus RespParser::ParseOneAt(size_t& pos, ParsedCommand& command) {
     }
 
     // Read bulk data
-    if (pos + static_cast<size_t>(bulk_len) + 2 > buffer_.size()) {
+    if (pos + static_cast<size_t>(bulk_len) + 2 > readable.size()) {
       pos = start;
       return ParseStatus::kIncomplete;
     }
-    command.args.push_back(
-        {.offset = pos, .length = static_cast<size_t>(bulk_len)});
+    command.args.emplace_back(readable.data() + pos,
+                              static_cast<size_t>(bulk_len));
     pos += static_cast<size_t>(bulk_len);
-    if (buffer_[pos] != '\r' || buffer_[pos + 1] != '\n') {
+    if (readable[pos] != '\r' || readable[pos + 1] != '\n') {
       error_ = "Missing CRLF after bulk data";
       return ParseStatus::kError;
     }
@@ -256,22 +223,6 @@ ParseStatus RespParser::ParseOneAt(size_t& pos, ParsedCommand& command) {
   }
 
   return ParseStatus::kComplete;
-}
-
-void RespParser::CommitParsedCommands(std::vector<ParsedCommand> commands,
-                                      size_t consumed) {
-  if (commands.empty()) return;
-
-  auto storage = std::make_shared<const std::string>(std::move(buffer_));
-  for (auto& command : commands) {
-    ready_commands_.push_back(RespCommand(storage, std::move(command.args)));
-  }
-
-  if (consumed < storage->size()) {
-    buffer_.assign(storage->data() + consumed, storage->size() - consumed);
-  } else {
-    buffer_.clear();
-  }
 }
 
 // ===== RespReply =====

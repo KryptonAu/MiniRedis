@@ -1,7 +1,7 @@
 #pragma once
 
 #include <cstddef>
-#include <cstdint>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -9,6 +9,28 @@
 #include "core/resp_protocol.h"
 
 namespace miniredis {
+
+class QueryBuffer {
+ public:
+  static constexpr size_t kDefaultReadSize = 64 * 1024;
+
+  QueryBuffer() = default;
+
+  std::span<char> PrepareWrite(size_t min_writable = kDefaultReadSize);
+  void CommitWrite(size_t bytes);
+  std::string_view Readable() const;
+  void Consume(size_t bytes);
+  void Clear();
+
+  size_t ReadableSize() const { return write_pos_ - read_pos_; }
+  size_t Capacity() const { return buffer_.size(); }
+  bool empty() const { return ReadableSize() == 0; }
+
+ private:
+  std::vector<char> buffer_;
+  size_t read_pos_ = 0;
+  size_t write_pos_ = 0;
+};
 
 class Client {
  public:
@@ -21,8 +43,8 @@ class Client {
   int CurrentDb() const;
   bool SelectDb(int index, int db_count);
 
-  std::vector<uint8_t>& QueryBuffer();
-  const std::vector<uint8_t>& QueryBuffer() const;
+  miniredis::QueryBuffer& QueryBuffer();
+  const miniredis::QueryBuffer& QueryBuffer() const;
   RespParser& Parser();
   const RespParser& Parser() const;
 
@@ -39,7 +61,7 @@ class Client {
   int fd_;
   size_t id_;
   int db_index_;
-  std::vector<uint8_t> query_buffer_;
+  miniredis::QueryBuffer query_buffer_;
   RespParser parser_;
   std::string reply_buffer_;
   bool authenticated_;

@@ -2,6 +2,7 @@
 
 #include <gtest/gtest.h>
 
+#include <cstdint>
 #include <limits>
 #include <string>
 #include <string_view>
@@ -10,73 +11,102 @@
 namespace miniredis {
 namespace {
 
+static bool ViewInside(std::string_view view, std::string_view storage) {
+  auto base = reinterpret_cast<uintptr_t>(storage.data());
+  auto end = base + storage.size();
+  auto view_base = reinterpret_cast<uintptr_t>(view.data());
+  return view_base >= base && view_base + view.size() <= end;
+}
+
 // ===== Parser: basic single command =====
 TEST(RespParserTest, ParseSimpleCommand) {
   RespParser parser;
-  auto status = parser.Feed("*2\r\n$3\r\nGET\r\n$3\r\nkey\r\n");
-  EXPECT_EQ(status, ParseStatus::kComplete);
-  EXPECT_TRUE(parser.HasCommand());
-  auto cmd = parser.TakeCommand();
+  std::string input = "*2\r\n$3\r\nGET\r\n$3\r\nkey\r\n";
+  auto parsed = parser.ParseNext(input);
+  EXPECT_EQ(parsed.status, ParseStatus::kComplete);
+  EXPECT_EQ(parsed.consumed, input.size());
+  auto& cmd = parsed.command;
   ASSERT_EQ(cmd.size(), 2);
   EXPECT_EQ(cmd[0], "GET");
   EXPECT_EQ(cmd[1], "key");
+  EXPECT_TRUE(ViewInside(cmd[0], input));
+  EXPECT_TRUE(ViewInside(cmd[1], input));
   EXPECT_EQ(cmd.ToOwnedVector(), std::vector<std::string>({"GET", "key"}));
 }
 
 TEST(RespParserTest, ParseSetCommand) {
   RespParser parser;
-  auto status = parser.Feed("*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$5\r\nvalue\r\n");
-  EXPECT_EQ(status, ParseStatus::kComplete);
-  EXPECT_TRUE(parser.HasCommand());
-  auto cmd = parser.TakeCommand();
+  std::string input = "*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$5\r\nvalue\r\n";
+  auto parsed = parser.ParseNext(input);
+  EXPECT_EQ(parsed.status, ParseStatus::kComplete);
+  EXPECT_EQ(parsed.consumed, input.size());
+  auto& cmd = parsed.command;
   ASSERT_EQ(cmd.size(), 3);
   EXPECT_EQ(cmd[0], "SET");
   EXPECT_EQ(cmd[1], "key");
   EXPECT_EQ(cmd[2], "value");
+  EXPECT_TRUE(ViewInside(cmd[0], input));
+  EXPECT_TRUE(ViewInside(cmd[1], input));
+  EXPECT_TRUE(ViewInside(cmd[2], input));
 }
 
 TEST(RespParserTest, EmptyBulkStringArgument) {
   RespParser parser;
-  auto status = parser.Feed("*2\r\n$3\r\nSET\r\n$0\r\n\r\n");
-  EXPECT_EQ(status, ParseStatus::kComplete);
-  auto cmd = parser.TakeCommand();
+  std::string input = "*2\r\n$3\r\nSET\r\n$0\r\n\r\n";
+  auto parsed = parser.ParseNext(input);
+  EXPECT_EQ(parsed.status, ParseStatus::kComplete);
+  auto& cmd = parsed.command;
   ASSERT_EQ(cmd.size(), 2);
   EXPECT_EQ(cmd[1], "");
+  EXPECT_TRUE(ViewInside(cmd[1], input));
 }
 
 // ===== Parser: partial reads =====
-TEST(RespParserTest, PartialFeedIncomplete) {
+TEST(RespParserTest, PartialInputIncomplete) {
   RespParser parser;
-  auto s1 = parser.Feed("*2\r\n$3\r\n");
-  EXPECT_EQ(s1, ParseStatus::kIncomplete);
-  EXPECT_FALSE(parser.HasCommand());
+  std::string partial = "*2\r\n$3\r\n";
+  auto parsed = parser.ParseNext(partial);
+  EXPECT_EQ(parsed.status, ParseStatus::kIncomplete);
+  EXPECT_EQ(parsed.consumed, 0u);
 
-  auto s2 = parser.Feed("GET\r\n$3\r\nkey\r\n");
-  EXPECT_EQ(s2, ParseStatus::kComplete);
-  EXPECT_TRUE(parser.HasCommand());
+  std::string complete = partial + "GET\r\n$3\r\nkey\r\n";
+  parsed = parser.ParseNext(complete);
+  EXPECT_EQ(parsed.status, ParseStatus::kComplete);
+  EXPECT_EQ(parsed.consumed, complete.size());
+  ASSERT_EQ(parsed.command.size(), 2);
+  EXPECT_EQ(parsed.command[0], "GET");
+  EXPECT_EQ(parsed.command[1], "key");
 }
 
 // ===== Parser: pipelining =====
 TEST(RespParserTest, PipeliningTwoCommands) {
   RespParser parser;
-  auto status = parser.Feed("*1\r\n$4\r\nPING\r\n*1\r\n$4\r\nPING\r\n");
-  EXPECT_EQ(status, ParseStatus::kComplete);
-  EXPECT_EQ(parser.PendingCommandCount(), 2);
+  std::string input = "*1\r\n$4\r\nPING\r\n*1\r\n$4\r\nPING\r\n";
 
-  auto cmd1 = parser.TakeCommand();
-  EXPECT_EQ(parser.PendingCommandCount(), 1);
-  auto cmd2 = parser.TakeCommand();
-  EXPECT_EQ(parser.PendingCommandCount(), 0);
+  auto first = parser.ParseNext(input);
+  ASSERT_EQ(first.status, ParseStatus::kComplete);
+  ASSERT_EQ(first.command.size(), 1);
+  EXPECT_EQ(first.command[0], "PING");
+
+  auto second =
+      parser.ParseNext(std::string_view(input).substr(first.consumed));
+  ASSERT_EQ(second.status, ParseStatus::kComplete);
+  ASSERT_EQ(second.command.size(), 1);
+  EXPECT_EQ(second.command[0], "PING");
+  EXPECT_EQ(first.consumed + second.consumed, input.size());
 }
 
-TEST(RespParserTest, TakenCommandSurvivesLaterFeed) {
+TEST(RespParserTest, TakenCommandSurvivesWhileOriginalStorageLives) {
   RespParser parser;
-  ASSERT_EQ(parser.Feed("*1\r\n$4\r\nPING\r\n"), ParseStatus::kComplete);
-  RespCommand first = parser.TakeCommand();
+  std::string first_input = "*1\r\n$4\r\nPING\r\n";
+  auto first_parse = parser.ParseNext(first_input);
+  ASSERT_EQ(first_parse.status, ParseStatus::kComplete);
+  RespCommand first = std::move(first_parse.command);
 
-  ASSERT_EQ(parser.Feed("*2\r\n$4\r\nECHO\r\n$3\r\nhey\r\n"),
-            ParseStatus::kComplete);
-  RespCommand second = parser.TakeCommand();
+  std::string second_input = "*2\r\n$4\r\nECHO\r\n$3\r\nhey\r\n";
+  auto second_parse = parser.ParseNext(second_input);
+  ASSERT_EQ(second_parse.status, ParseStatus::kComplete);
+  RespCommand second = std::move(second_parse.command);
 
   EXPECT_EQ(first.size(), 1);
   EXPECT_EQ(first[0], "PING");
@@ -96,16 +126,16 @@ TEST(RespParserTest, LargePipelineKeepsOrderAndClearsBuffer) {
     input += frame;
   }
 
-  EXPECT_EQ(parser.Feed(input), ParseStatus::kComplete);
-  EXPECT_EQ(parser.PendingCommandCount(), static_cast<size_t>(kCommandCount));
-  EXPECT_EQ(parser.BufferSize(), 0);
-
+  size_t offset = 0;
   for (int i = 0; i < kCommandCount; i++) {
-    RespCommand cmd = parser.TakeCommand();
+    auto parsed = parser.ParseNext(std::string_view(input).substr(offset));
+    ASSERT_EQ(parsed.status, ParseStatus::kComplete);
+    RespCommand cmd = std::move(parsed.command);
     ASSERT_EQ(cmd.size(), 1);
     EXPECT_EQ(cmd[0], "PING");
+    offset += parsed.consumed;
   }
-  EXPECT_FALSE(parser.HasCommand());
+  EXPECT_EQ(offset, input.size());
 }
 
 TEST(RespParserTest, LargeBulkStringCanArriveInPieces) {
@@ -114,47 +144,51 @@ TEST(RespParserTest, LargeBulkStringCanArriveInPieces) {
   std::string prefix =
       "*2\r\n$3\r\nSET\r\n$" + std::to_string(value.size()) + "\r\n";
 
-  EXPECT_EQ(parser.Feed(prefix), ParseStatus::kIncomplete);
-  EXPECT_FALSE(parser.HasCommand());
-  EXPECT_EQ(parser.BufferSize(), prefix.size());
+  auto partial = parser.ParseNext(prefix);
+  EXPECT_EQ(partial.status, ParseStatus::kIncomplete);
+  EXPECT_EQ(partial.consumed, 0u);
 
-  EXPECT_EQ(parser.Feed(value + "\r\n"), ParseStatus::kComplete);
-  ASSERT_TRUE(parser.HasCommand());
-  RespCommand cmd = parser.TakeCommand();
+  std::string complete = prefix + value + "\r\n";
+  auto parsed = parser.ParseNext(complete);
+  EXPECT_EQ(parsed.status, ParseStatus::kComplete);
+  EXPECT_EQ(parsed.consumed, complete.size());
+  RespCommand cmd = std::move(parsed.command);
   ASSERT_EQ(cmd.size(), 2);
   EXPECT_EQ(cmd[0], "SET");
   EXPECT_EQ(cmd[1], value);
-  EXPECT_EQ(parser.BufferSize(), 0);
+  EXPECT_TRUE(ViewInside(cmd[1], complete));
 }
 
 // ===== Parser: error cases =====
 TEST(RespParserTest, EmptyArrayError) {
   RespParser parser;
-  auto status = parser.Feed("*0\r\n");
-  EXPECT_EQ(status, ParseStatus::kError);
+  auto parsed = parser.ParseNext("*0\r\n");
+  EXPECT_EQ(parsed.status, ParseStatus::kError);
   EXPECT_TRUE(parser.LastError().has_value());
 }
 
 TEST(RespParserTest, NullBulkInCommandError) {
   RespParser parser;
-  auto status = parser.Feed("*2\r\n$-1\r\n\r\n$3\r\nfoo\r\n");
-  EXPECT_EQ(status, ParseStatus::kError);
+  auto parsed = parser.ParseNext("*2\r\n$-1\r\n\r\n$3\r\nfoo\r\n");
+  EXPECT_EQ(parsed.status, ParseStatus::kError);
 }
 
 TEST(RespParserTest, NestedArrayError) {
   RespParser parser;
-  auto status = parser.Feed("*2\r\n*1\r\n$4\r\nNEST\r\n\r\n$3\r\nfoo\r\n");
-  EXPECT_EQ(status, ParseStatus::kError);
+  auto parsed = parser.ParseNext("*2\r\n*1\r\n$4\r\nNEST\r\n\r\n$3\r\nfoo\r\n");
+  EXPECT_EQ(parsed.status, ParseStatus::kError);
 }
 
 TEST(RespParserTest, ResetAfterError) {
   RespParser parser;
-  parser.Feed("*0\r\n");                                  // error
-  EXPECT_EQ(parser.Feed("*2\r\n"), ParseStatus::kError);  // still errors
+  parser.ParseNext("*0\r\n");  // error
+  EXPECT_EQ(parser.ParseNext("*2\r\n").status,
+            ParseStatus::kError);  // still errors
   parser.Reset();
-  auto status = parser.Feed("*1\r\n$4\r\nPING\r\n");
-  EXPECT_EQ(status, ParseStatus::kComplete);
-  EXPECT_TRUE(parser.HasCommand());
+  auto parsed = parser.ParseNext("*1\r\n$4\r\nPING\r\n");
+  EXPECT_EQ(parsed.status, ParseStatus::kComplete);
+  ASSERT_EQ(parsed.command.size(), 1);
+  EXPECT_EQ(parsed.command[0], "PING");
 }
 
 // ===== Reply: Simple types =====

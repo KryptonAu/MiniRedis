@@ -13,6 +13,7 @@
 #include <exception>
 #include <stdexec/execution.hpp>
 #include <string>
+#include <string_view>
 #include <thread>
 
 #include "io/epoll_context.h"
@@ -70,12 +71,15 @@ TEST(AsyncIoTest, AsyncReadReceivesData) {
   ASSERT_EQ(::write(wfd, msg.data(), msg.size()),
             static_cast<ssize_t>(msg.size()));
 
-  auto sender =
-      stdexec::starts_on(io_sched, AsyncReadSender{&io.ctx, rfd} |
-                                       stdexec::then([&](AsyncReadResult r) {
-                                         EXPECT_FALSE(r.eof);
-                                         EXPECT_EQ(r.data, msg);
-                                       }));
+  std::array<char, 64> read_buf{};
+  auto sender = stdexec::starts_on(
+      io_sched, AsyncReadSender{&io.ctx, rfd, read_buf} |
+                    stdexec::then([&](AsyncReadResult r) {
+                      EXPECT_FALSE(r.eof);
+                      EXPECT_EQ(r.bytes_read, msg.size());
+                      EXPECT_EQ(std::string_view(read_buf.data(), r.bytes_read),
+                                msg);
+                    }));
   stdexec::sync_wait(std::move(sender));
 
   close(rfd);
@@ -90,11 +94,12 @@ TEST(AsyncIoTest, AsyncReadDetectsEof) {
 
   ::close(wfd);
 
+  std::array<char, 64> read_buf{};
   auto sender =
-      stdexec::starts_on(io_sched, AsyncReadSender{&io.ctx, rfd} |
+      stdexec::starts_on(io_sched, AsyncReadSender{&io.ctx, rfd, read_buf} |
                                        stdexec::then([&](AsyncReadResult r) {
                                          EXPECT_TRUE(r.eof);
-                                         EXPECT_TRUE(r.data.empty());
+                                         EXPECT_EQ(r.bytes_read, 0u);
                                        }));
   stdexec::sync_wait(std::move(sender));
 
@@ -112,14 +117,17 @@ TEST(AsyncIoTest, AsyncReadHandlesPartialData) {
             static_cast<ssize_t>(big_msg.size()));
 
   std::string collected;
-  auto sender =
-      stdexec::starts_on(io_sched, AsyncReadSender{&io.ctx, rfd} |
-                                       stdexec::then([&](AsyncReadResult r) {
-                                         collected = std::move(r.data);
-                                         EXPECT_FALSE(r.eof);
-                                         EXPECT_GT(collected.size(), 0u);
-                                       }));
+  std::array<char, 1024> read_buf{};
+  auto sender = stdexec::starts_on(
+      io_sched, AsyncReadSender{&io.ctx, rfd, read_buf} |
+                    stdexec::then([&](AsyncReadResult r) {
+                      EXPECT_FALSE(r.eof);
+                      EXPECT_GT(r.bytes_read, 0u);
+                      EXPECT_LE(r.bytes_read, read_buf.size());
+                      collected.assign(read_buf.data(), r.bytes_read);
+                    }));
   stdexec::sync_wait(std::move(sender));
+  EXPECT_EQ(collected, big_msg.substr(0, collected.size()));
 
   close(rfd);
   close(wfd);
@@ -215,12 +223,14 @@ TEST(AsyncIoTest, PendingReadReceivesStoppedOnShutdown) {
   ThreadGuard io_guard(io_thread);
 
   std::atomic<bool> stopped{false};
+  std::array<char, 1> read_buf{};
   std::thread waiter([&] {
-    auto sender = stdexec::starts_on(
-        io_sched, AsyncReadSender{&ctx, rfd} | stdexec::upon_stopped([&] {
-                    stopped = true;
-                    return AsyncReadResult{};
-                  }));
+    auto sender =
+        stdexec::starts_on(io_sched, AsyncReadSender{&ctx, rfd, read_buf} |
+                                         stdexec::upon_stopped([&] {
+                                           stopped = true;
+                                           return AsyncReadResult{};
+                                         }));
     stdexec::sync_wait(std::move(sender));
   });
 
@@ -240,10 +250,12 @@ TEST(AsyncIoTest, ScheduleAfterStopCompletesStopped) {
   ctx.Stop();
 
   bool stopped = false;
-  auto sender = AsyncReadSender{&ctx, rfd} | stdexec::upon_stopped([&] {
-                  stopped = true;
-                  return AsyncReadResult{};
-                });
+  std::array<char, 1> read_buf{};
+  auto sender =
+      AsyncReadSender{&ctx, rfd, read_buf} | stdexec::upon_stopped([&] {
+        stopped = true;
+        return AsyncReadResult{};
+      });
   stdexec::sync_wait(std::move(sender));
 
   EXPECT_TRUE(stopped);

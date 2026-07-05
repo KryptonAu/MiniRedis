@@ -6,9 +6,10 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-#include <array>
 #include <cerrno>
+#include <cstddef>
 #include <cstdint>
+#include <span>
 #include <stdexec/execution.hpp>
 #include <string>
 #include <system_error>
@@ -47,7 +48,7 @@ struct FdState {
 // AsyncReadResult
 // ===========================================================================
 struct AsyncReadResult {
-  std::string data;
+  size_t bytes_read = 0;
   bool eof = false;
 };
 
@@ -64,6 +65,7 @@ class AsyncReadSender {
 
   EpollContext* sched_ = nullptr;
   int fd_ = -1;
+  std::span<char> buffer_;
 
   template <class Rcvr>
   struct OpState;
@@ -77,10 +79,15 @@ struct AsyncReadSender::OpState final : EpollIoOpBase {
   using operation_state_concept = stdexec::operation_state_tag;
 
   EpollContext* sched_;
+  std::span<char> buffer_;
   Rcvr rcvr_;
 
-  OpState(EpollContext* sched, int client_fd, Rcvr rcvr) noexcept
-      : EpollIoOpBase{}, sched_(sched), rcvr_(std::move(rcvr)) {
+  OpState(EpollContext* sched, int client_fd, std::span<char> buffer,
+          Rcvr rcvr) noexcept
+      : EpollIoOpBase{},
+        sched_(sched),
+        buffer_(buffer),
+        rcvr_(std::move(rcvr)) {
     this->fd = client_fd;
   }
 
@@ -97,7 +104,7 @@ struct AsyncReadSender::OpState final : EpollIoOpBase {
 template <class Rcvr>
 inline auto AsyncReadSender::connect(Rcvr rcvr) const noexcept
     -> AsyncReadSender::OpState<Rcvr> {
-  return AsyncReadSender::OpState<Rcvr>{sched_, fd_, std::move(rcvr)};
+  return AsyncReadSender::OpState<Rcvr>{sched_, fd_, buffer_, std::move(rcvr)};
 }
 
 // ===========================================================================
@@ -213,17 +220,20 @@ inline auto AsyncAcceptSender::connect(Rcvr rcvr) const noexcept
 
 template <class Rcvr>
 inline void AsyncReadSender::OpState<Rcvr>::start() & noexcept {
+  if (buffer_.empty()) {
+    stdexec::set_value(std::move(rcvr_), AsyncReadResult{});
+    return;
+  }
   sched_->ScheduleArmIo(this);
 }
 
 template <class Rcvr>
 inline void AsyncReadSender::OpState<Rcvr>::OnReady(uint32_t events) noexcept {
   if (events & (EPOLLERR | EPOLLHUP | EPOLLRDHUP)) {
-    std::array<char, 65536> buf{};
-    ssize_t n = ::read(this->fd, buf.data(), buf.size());
+    ssize_t n = ::read(this->fd, buffer_.data(), buffer_.size());
     if (n > 0) {
       AsyncReadResult r;
-      r.data.assign(buf.data(), static_cast<size_t>(n));
+      r.bytes_read = static_cast<size_t>(n);
       r.eof = false;
       stdexec::set_value(std::move(rcvr_), std::move(r));
       return;
@@ -247,11 +257,10 @@ inline void AsyncReadSender::OpState<Rcvr>::OnReady(uint32_t events) noexcept {
   }
 
   // EPOLLIN: read available data.
-  std::array<char, 65536> buf{};
-  ssize_t n = ::read(this->fd, buf.data(), buf.size());
+  ssize_t n = ::read(this->fd, buffer_.data(), buffer_.size());
   if (n > 0) {
     AsyncReadResult r;
-    r.data.assign(buf.data(), static_cast<size_t>(n));
+    r.bytes_read = static_cast<size_t>(n);
     r.eof = false;
     stdexec::set_value(std::move(rcvr_), std::move(r));
     return;

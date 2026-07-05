@@ -1,8 +1,6 @@
 #pragma once
 
 #include <cstddef>
-#include <deque>
-#include <memory>
 #include <optional>
 #include <span>
 #include <string>
@@ -30,44 +28,38 @@ class RespCommand {
  private:
   friend class RespParser;
 
-  struct ArgSpan {
-    size_t offset = 0;
-    size_t length = 0;
-  };
+  explicit RespCommand(std::vector<std::string_view> args);
 
-  RespCommand(std::shared_ptr<const std::string> storage,
-              std::vector<ArgSpan> spans);
-
-  std::shared_ptr<const std::string> storage_;
   std::vector<std::string_view> args_;
+};
+
+struct RespParseResult {
+  ParseStatus status = ParseStatus::kIncomplete;
+  RespCommand command;
+  size_t consumed = 0;
 };
 
 class RespParser {
  public:
   RespParser();
 
-  ParseStatus Feed(std::string_view data);
-
-  bool HasCommand() const;
-  size_t PendingCommandCount() const;
-  RespCommand TakeCommand();
+  // Parses one command in-place from caller-owned storage. A completed
+  // RespCommand contains string_views into `readable`, so the caller must keep
+  // that storage stable until command execution finishes.
+  RespParseResult ParseNext(std::string_view readable);
 
   void Reset();
   std::optional<std::string_view> LastError() const;
-  size_t BufferSize() const;
 
  private:
   struct ParsedCommand {
-    std::vector<RespCommand::ArgSpan> args;
+    std::vector<std::string_view> args;
   };
 
-  std::string buffer_;
-  std::deque<RespCommand> ready_commands_;
   std::string error_;
 
-  ParseStatus ParseOneAt(size_t& pos, ParsedCommand& command);
-  void CommitParsedCommands(std::vector<ParsedCommand> commands,
-                            size_t consumed);
+  ParseStatus ParseOneAt(std::string_view readable, size_t& pos,
+                         ParsedCommand& command);
 };
 
 class RespReply {

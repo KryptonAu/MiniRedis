@@ -11,6 +11,7 @@
 #include <stdexec/execution.hpp>
 #include <string>
 #include <thread>
+#include <utility>
 
 #include "commands/registry.h"
 #include "core/server.h"
@@ -84,119 +85,114 @@ static std::string ReadResp(int fd) {
   return first;
 }
 
+template <typename Run>
+static void WithClientSession(Run&& run) {
+  auto [server_fd, client_fd] = MakeSocketPair();
+
+  Server& server = Server::Instance();
+  MiniRedisConfig config;
+  config.databases = 4;
+  server.Init(config);
+
+  auto registry = CreateDefaultCommandRegistry();
+
+  EpollContext io_ctx;
+  CmdContext cmd_ctx;
+  auto io_sched = io_ctx.get_scheduler();
+  auto cmd_sched = cmd_ctx.get_scheduler();
+
+  exec::async_scope scope;
+
+  std::thread cmd_thread([&] { cmd_ctx.Run(); });
+
+  std::thread io_thread([&] {
+    scope.spawn(stdexec::starts_on(
+        io_sched,
+        handle_client(io_sched, cmd_sched, server_fd, server, registry)));
+    io_ctx.Run();
+  });
+
+  auto cleanup = ScopeExit([&] {
+    if (client_fd >= 0) {
+      ::close(client_fd);
+      client_fd = -1;
+    }
+    io_ctx.Stop();
+    stdexec::sync_wait(scope.on_empty());
+    cmd_ctx.Stop();
+    if (io_thread.joinable()) io_thread.join();
+    if (cmd_thread.joinable()) cmd_thread.join();
+    server.Shutdown();
+  });
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  std::forward<Run>(run)(client_fd);
+}
+
 // =========================================================================
 // Client session tests
 // =========================================================================
 
 TEST(ClientSessionTest, PingRoundTrip) {
-  auto [server_fd, client_fd] = MakeSocketPair();
+  WithClientSession([](int client_fd) {
+    std::string ping = "*1\r\n$4\r\nPING\r\n";
+    ASSERT_EQ(::write(client_fd, ping.data(), ping.size()),
+              static_cast<ssize_t>(ping.size()));
 
-  Server& server = Server::Instance();
-  MiniRedisConfig config;
-  config.databases = 4;
-  server.Init(config);
-
-  auto registry = CreateDefaultCommandRegistry();
-
-  EpollContext io_ctx;
-  CmdContext cmd_ctx;
-  auto io_sched = io_ctx.get_scheduler();
-  auto cmd_sched = cmd_ctx.get_scheduler();
-
-  exec::async_scope scope;
-
-  std::thread cmd_thread([&] { cmd_ctx.Run(); });
-
-  // Start the IO loop and spawn the client task.
-  std::thread io_thread([&] {
-    scope.spawn(stdexec::starts_on(
-        io_sched,
-        handle_client(io_sched, cmd_sched, server_fd, server, registry)));
-    io_ctx.Run();
+    ASSERT_TRUE(WaitReadable(client_fd, 5000));
+    std::string reply = ReadResp(client_fd);
+    EXPECT_EQ(reply, "+PONG\r\n");
   });
-
-  auto cleanup = ScopeExit([&] {
-    if (client_fd >= 0) {
-      ::close(client_fd);
-      client_fd = -1;
-    }
-    io_ctx.Stop();
-    stdexec::sync_wait(scope.on_empty());
-    cmd_ctx.Stop();
-    if (io_thread.joinable()) io_thread.join();
-    if (cmd_thread.joinable()) cmd_thread.join();
-    server.Shutdown();
-  });
-
-  // Give IO thread a moment to start.
-  std::this_thread::sleep_for(std::chrono::milliseconds(10));
-
-  // Send PING.
-  std::string ping = "*1\r\n$4\r\nPING\r\n";
-  ASSERT_EQ(::write(client_fd, ping.data(), ping.size()),
-            static_cast<ssize_t>(ping.size()));
-
-  ASSERT_TRUE(WaitReadable(client_fd, 5000));
-  std::string reply = ReadResp(client_fd);
-  EXPECT_EQ(reply, "+PONG\r\n");
 }
 
 TEST(ClientSessionTest, SetGetRoundTrip) {
-  auto [server_fd, client_fd] = MakeSocketPair();
+  WithClientSession([](int client_fd) {
+    std::string set_cmd = "*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$5\r\nhello\r\n";
+    ASSERT_EQ(::write(client_fd, set_cmd.data(), set_cmd.size()),
+              static_cast<ssize_t>(set_cmd.size()));
+    ASSERT_TRUE(WaitReadable(client_fd, 5000));
+    std::string set_reply = ReadResp(client_fd);
+    EXPECT_EQ(set_reply, "+OK\r\n");
 
-  Server& server = Server::Instance();
-  MiniRedisConfig config;
-  config.databases = 4;
-  server.Init(config);
-
-  auto registry = CreateDefaultCommandRegistry();
-
-  EpollContext io_ctx;
-  CmdContext cmd_ctx;
-  auto io_sched = io_ctx.get_scheduler();
-  auto cmd_sched = cmd_ctx.get_scheduler();
-
-  exec::async_scope scope;
-
-  std::thread cmd_thread([&] { cmd_ctx.Run(); });
-
-  std::thread io_thread([&] {
-    scope.spawn(stdexec::starts_on(
-        io_sched,
-        handle_client(io_sched, cmd_sched, server_fd, server, registry)));
-    io_ctx.Run();
+    std::string get_cmd = "*2\r\n$3\r\nGET\r\n$3\r\nkey\r\n";
+    ASSERT_EQ(::write(client_fd, get_cmd.data(), get_cmd.size()),
+              static_cast<ssize_t>(get_cmd.size()));
+    ASSERT_TRUE(WaitReadable(client_fd, 5000));
+    std::string get_reply = ReadResp(client_fd);
+    EXPECT_EQ(get_reply, "$5\r\nhello\r\n");
   });
+}
 
-  auto cleanup = ScopeExit([&] {
-    if (client_fd >= 0) {
-      ::close(client_fd);
-      client_fd = -1;
-    }
-    io_ctx.Stop();
-    stdexec::sync_wait(scope.on_empty());
-    cmd_ctx.Stop();
-    if (io_thread.joinable()) io_thread.join();
-    if (cmd_thread.joinable()) cmd_thread.join();
-    server.Shutdown();
+TEST(ClientSessionTest, FragmentedCommandRoundTrip) {
+  WithClientSession([](int client_fd) {
+    std::string part1 = "*1\r\n$4\r\nPI";
+    std::string part2 = "NG\r\n";
+    ASSERT_EQ(::write(client_fd, part1.data(), part1.size()),
+              static_cast<ssize_t>(part1.size()));
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    ASSERT_EQ(::write(client_fd, part2.data(), part2.size()),
+              static_cast<ssize_t>(part2.size()));
+
+    ASSERT_TRUE(WaitReadable(client_fd, 5000));
+    EXPECT_EQ(ReadResp(client_fd), "+PONG\r\n");
   });
+}
 
-  std::this_thread::sleep_for(std::chrono::milliseconds(10));
+TEST(ClientSessionTest, PipelinedSetGetRoundTrip) {
+  WithClientSession([](int client_fd) {
+    std::string set_cmd =
+        "*3\r\n$3\r\nSET\r\n$8\r\npipe-key\r\n$5\r\nvalue\r\n";
+    std::string get_cmd = "*2\r\n$3\r\nGET\r\n$8\r\npipe-key\r\n";
+    std::string pipeline = set_cmd + get_cmd;
 
-  // SET
-  std::string set_cmd = "*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$5\r\nhello\r\n";
-  ASSERT_EQ(::write(client_fd, set_cmd.data(), set_cmd.size()),
-            static_cast<ssize_t>(set_cmd.size()));
-  ASSERT_TRUE(WaitReadable(client_fd, 5000));
-  std::string set_reply = ReadResp(client_fd);
-  EXPECT_EQ(set_reply, "+OK\r\n");
+    ASSERT_EQ(::write(client_fd, pipeline.data(), pipeline.size()),
+              static_cast<ssize_t>(pipeline.size()));
 
-  // GET
-  std::string get_cmd = "*2\r\n$3\r\nGET\r\n$3\r\nkey\r\n";
-  ASSERT_EQ(::write(client_fd, get_cmd.data(), get_cmd.size()),
-            static_cast<ssize_t>(get_cmd.size()));
-  ASSERT_TRUE(WaitReadable(client_fd, 5000));
-  std::string get_reply = ReadResp(client_fd);
-  EXPECT_EQ(get_reply, "$5\r\nhello\r\n");
+    ASSERT_TRUE(WaitReadable(client_fd, 5000));
+    EXPECT_EQ(ReadResp(client_fd), "+OK\r\n");
+    ASSERT_TRUE(WaitReadable(client_fd, 5000));
+    EXPECT_EQ(ReadResp(client_fd), "$5\r\nvalue\r\n");
+  });
 }
 
 }  // namespace

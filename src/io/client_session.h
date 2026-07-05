@@ -5,6 +5,7 @@
 #include <exec/async_scope.hpp>
 #include <exec/task.hpp>
 #include <functional>
+#include <span>
 #include <stdexec/execution.hpp>
 #include <string>
 #include <utility>
@@ -53,25 +54,29 @@ inline exec::task<void> handle_client(
 
   try {
     auto& parser = client->Parser();
+    auto& query_buf = client->QueryBuffer();
     auto& reply_buf = client->ReplyBuffer();
 
     while (true) {
+      std::span<char> write_buf = query_buf.PrepareWrite();
       AsyncReadResult read =
-          co_await AsyncReadSender{io_sched.GetContext(), client_fd};
+          co_await AsyncReadSender{io_sched.GetContext(), client_fd, write_buf};
       if (read.eof) co_return;
+      query_buf.CommitWrite(read.bytes_read);
 
-      ParseStatus status = parser.Feed(read.data);
-      if (status == ParseStatus::kError) {
-        std::string err_reply = RespReply::Error("ERR protocol error");
-        AsyncWriteSender writer{io_sched.GetContext(), client_fd,
-                                std::move(err_reply)};
-        (void)co_await std::move(writer);
-        co_return;
-      }
+      while (true) {
+        RespParseResult parsed = parser.ParseNext(query_buf.Readable());
+        if (parsed.status == ParseStatus::kIncomplete) break;
+        if (parsed.status == ParseStatus::kError) {
+          std::string err_reply = RespReply::Error("ERR protocol error");
+          AsyncWriteSender writer{io_sched.GetContext(), client_fd,
+                                  std::move(err_reply)};
+          (void)co_await std::move(writer);
+          co_return;
+        }
 
-      while (parser.HasCommand()) {
-        RespCommand command = parser.TakeCommand();
-
+        size_t consumed = parsed.consumed;
+        RespCommand command = std::move(parsed.command);
         std::string reply = co_await stdexec::starts_on(
             cmd_sched, stdexec::just(std::move(command)) |
                            stdexec::then([&](RespCommand cmd_args) {
@@ -87,6 +92,7 @@ inline exec::task<void> handle_client(
                            }));
         // Transfer back to the IO thread before touching parser/reply_buf.
         co_await io_sched.schedule();
+        query_buf.Consume(consumed);
         reply_buf += reply;
       }
 
