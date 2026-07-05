@@ -1,37 +1,58 @@
 #include "core/database.h"
 
 #include <chrono>
-#include <cstring>
 
 namespace miniredis {
 
-static constexpr uint32_t kLruClockMax = 0xFFFFFF;  // 24-bit
+namespace {
+
+constexpr size_t kDictEntryOverhead = 32;
+constexpr size_t kExpireMetadataOverhead = sizeof(int64_t);
+constexpr size_t kLruMetadataOverhead = sizeof(uint32_t);
+
+}  // namespace
 
 Database::Database() = default;
 
 bool Database::ExpireIfNeeded(std::string_view key) {
-  auto* expire_ms = expires_.FindView(key);
-  if (!expire_ms) return false;            // no expiry set
-  if (*expire_ms > NowMs()) return false;  // not yet expired
-  // Expired — delete
-  keyspace_.DeleteView(key);
-  expires_.DeleteView(key);
-  lru_.DeleteView(key);
-  return true;
+  auto* entry = entries_.FindView(key);
+  if (!entry || !entry->expire_at_ms.has_value()) return false;
+  if (*entry->expire_at_ms > NowMs()) return false;
+  return DeleteEntry(key);
+}
+
+bool Database::DeleteEntry(std::string_view key) {
+  auto* entry = entries_.FindView(key);
+  if (!entry) return false;
+  if (entry->expire_at_ms.has_value()) {
+    volatile_count_--;
+  }
+  return entries_.DeleteView(key);
+}
+
+void Database::SetEntryExpire(Entry& entry,
+                              std::optional<int64_t> expire_at_ms) {
+  bool had_expire = entry.expire_at_ms.has_value();
+  bool has_expire = expire_at_ms.has_value();
+  entry.expire_at_ms = expire_at_ms;
+
+  if (!had_expire && has_expire) {
+    volatile_count_++;
+  } else if (had_expire && !has_expire) {
+    volatile_count_--;
+  }
 }
 
 size_t Database::PurgeExpiredKeys(int64_t now_ms) {
   size_t removed = 0;
-  auto it = expires_.SafeBegin();
-  auto end = expires_.SafeEnd();
+  auto it = entries_.SafeBegin();
+  auto end = entries_.SafeEnd();
   while (it != end) {
     std::string_view key = it->key;
-    int64_t expire_at = it->value;
+    auto expire_at = it->value.expire_at_ms;
     ++it;
-    if (expire_at > now_ms) continue;  // not yet expired
-    keyspace_.DeleteView(key);
-    lru_.DeleteView(key);
-    expires_.DeleteView(key);
+    if (!expire_at.has_value() || *expire_at > now_ms) continue;
+    DeleteEntry(key);
     removed++;
   }
   return removed;
@@ -40,16 +61,17 @@ size_t Database::PurgeExpiredKeys(int64_t now_ms) {
 ExpireSampleResult Database::ExpireSome(int64_t now_ms, size_t count,
                                         uint64_t seed) {
   ExpireSampleResult result;
-  if (count == 0 || expires_.Size() == 0) return result;
+  if (count == 0 || volatile_count_ == 0) return result;
 
-  auto samples = expires_.GetSomeKeys(count, seed);
-  result.sampled = samples.size();
+  auto samples = entries_.GetSomeKeys(entries_.Size(), seed);
   for (auto* entry : samples) {
+    if (!entry->value.expire_at_ms.has_value()) continue;
+    if (result.sampled >= count) break;
+
     std::string key = entry->key;
-    if (entry->value > now_ms) continue;
-    expires_.DeleteView(key);
-    lru_.DeleteView(key);
-    if (keyspace_.DeleteView(key)) {
+    result.sampled++;
+    if (*entry->value.expire_at_ms > now_ms) continue;
+    if (DeleteEntry(key)) {
       result.expired++;
     }
   }
@@ -58,14 +80,12 @@ ExpireSampleResult Database::ExpireSome(int64_t now_ms, size_t count,
 
 void Database::ForEachKey(KeyVisitor visitor) {
   PurgeExpiredKeys(NowMs());
-  for (auto it = keyspace_.begin(); it != keyspace_.end(); ++it) {
-    auto* exp = expires_.FindView(it->key);
-    auto* lr = lru_.FindView(it->key);
+  for (auto it = entries_.begin(); it != entries_.end(); ++it) {
     KeyView kv{
         /*key=*/it->key,
-        /*value=*/it->value,
-        /*expire_at_ms=*/exp ? std::optional<int64_t>(*exp) : std::nullopt,
-        /*lru_clock=*/lr ? *lr : 0,
+        /*value=*/it->value.value,
+        /*expire_at_ms=*/it->value.expire_at_ms,
+        /*lru_clock=*/it->value.lru_clock,
     };
     visitor(kv);
   }
@@ -74,42 +94,41 @@ void Database::ForEachKey(KeyVisitor visitor) {
 std::vector<std::string> Database::SampleKeys(size_t count, bool only_volatile,
                                               uint64_t seed) {
   std::vector<std::string> result;
-  if (count == 0 || keyspace_.Size() == 0) return result;
+  if (count == 0 || entries_.Size() == 0) return result;
 
-  if (only_volatile && expires_.Size() == 0) return result;
+  if (only_volatile && volatile_count_ == 0) return result;
 
-  // Sample from expires_ (only volatile) or keyspace_ (all keys).
-  if (only_volatile) {
-    auto samples = expires_.GetSomeKeys(count, seed);
-    for (auto* entry : samples) {
-      result.push_back(entry->key);
+  size_t sample_count = only_volatile ? entries_.Size() : count;
+  auto samples = entries_.GetSomeKeys(sample_count, seed);
+  for (auto* entry : samples) {
+    if (only_volatile && !entry->value.expire_at_ms.has_value()) {
+      continue;
     }
-  } else {
-    auto samples = keyspace_.GetSomeKeys(count, seed);
-    for (auto* entry : samples) {
-      result.push_back(entry->key);
-    }
+    result.push_back(entry->key);
+    if (result.size() >= count) break;
   }
   return result;
 }
 
 std::optional<int64_t> Database::ExpireAt(std::string_view key) const {
-  auto* v = expires_.FindView(key);
-  if (!v) return std::nullopt;
-  return *v;
+  auto* entry = entries_.FindView(key);
+  if (!entry) return std::nullopt;
+  return entry->expire_at_ms;
 }
 
 void Database::RestoreValue(std::string key, Value value,
                             std::optional<int64_t> expire_at_ms) {
-  // Always update LRU clock on restore.
-  keyspace_.SetView(key, std::move(value));
-  lru_.SetView(key, current_lru_clock_);
-
-  if (expire_at_ms.has_value()) {
-    expires_.SetView(key, *expire_at_ms);
-  } else {
-    expires_.DeleteView(key);
+  if (auto* existing = entries_.FindView(key);
+      existing && existing->expire_at_ms.has_value()) {
+    volatile_count_--;
   }
+  Entry entry{
+      /*value=*/std::move(value),
+      /*expire_at_ms=*/expire_at_ms,
+      /*lru_clock=*/current_lru_clock_,
+  };
+  if (entry.expire_at_ms.has_value()) volatile_count_++;
+  entries_.Set(std::move(key), std::move(entry));
 }
 
 size_t Database::ApproxMemoryUsage() const {
@@ -117,28 +136,27 @@ size_t Database::ApproxMemoryUsage() const {
   // Iterate via const_cast for read-only estimation (SafeIterator prevents
   // rehash so const is fine).
   auto* self = const_cast<Database*>(this);
-  for (auto it = self->keyspace_.SafeBegin(); it != self->keyspace_.SafeEnd();
+  for (auto it = self->entries_.SafeBegin(); it != self->entries_.SafeEnd();
        ++it) {
-    total += it->key.size();                           // key
-    total += miniredis::ApproxMemoryUsage(it->value);  // value
+    total += it->key.size();
+    total += miniredis::ApproxMemoryUsage(it->value.value);
+    total += kDictEntryOverhead;
+    total += kLruMetadataOverhead;
+    if (it->value.expire_at_ms.has_value()) total += kExpireMetadataOverhead;
   }
-  // Estimate dict overhead: ~32 bytes per entry for bucket pointers + metadata
-  total += keyspace_.Size() * 32;
-  total += expires_.Size() * 24;
-  total += lru_.Size() * 12;
   return total;
 }
 
 std::optional<size_t> Database::ApproxMemoryUsageOf(
     std::string_view key) const {
-  auto* value = keyspace_.FindView(key);
-  if (!value) return std::nullopt;
+  auto* entry = entries_.FindView(key);
+  if (!entry) return std::nullopt;
 
   size_t total = key.size();
-  total += miniredis::ApproxMemoryUsage(*value);
-  total += 32;
-  if (expires_.FindView(key)) total += 24;
-  if (lru_.FindView(key)) total += 12;
+  total += miniredis::ApproxMemoryUsage(entry->value);
+  total += kDictEntryOverhead;
+  total += kLruMetadataOverhead;
+  if (entry->expire_at_ms.has_value()) total += kExpireMetadataOverhead;
   return total;
 }
 
@@ -147,13 +165,14 @@ void Database::SetCurrentLruClock(uint32_t clock) {
 }
 
 void Database::Touch(std::string_view key) {
-  lru_.SetView(key, current_lru_clock_);
+  auto* entry = entries_.FindView(key);
+  if (entry) entry->lru_clock = current_lru_clock_;
 }
 
 std::optional<uint32_t> Database::LruOf(std::string_view key) const {
-  auto* v = lru_.FindView(key);
-  if (!v) return std::nullopt;
-  return *v;
+  auto* entry = entries_.FindView(key);
+  if (!entry) return std::nullopt;
+  return entry->lru_clock;
 }
 
 int64_t Database::NowMs() const {
@@ -164,90 +183,71 @@ int64_t Database::NowMs() const {
 
 bool Database::Exists(std::string_view key) {
   ExpireIfNeeded(key);
-  return keyspace_.FindView(key) != nullptr;
+  return entries_.FindView(key) != nullptr;
 }
 
 std::optional<ValueType> Database::Type(std::string_view key) {
   ExpireIfNeeded(key);
-  auto* val = keyspace_.FindView(key);
-  if (!val) return std::nullopt;
-  return GetType(*val);
+  auto* entry = entries_.FindView(key);
+  if (!entry) return std::nullopt;
+  return GetType(entry->value);
 }
 
-bool Database::Delete(std::string_view key) {
-  expires_.DeleteView(key);
-  lru_.DeleteView(key);
-  return keyspace_.DeleteView(key);
-}
+bool Database::Delete(std::string_view key) { return DeleteEntry(key); }
 
 Value* Database::Find(std::string_view key) {
   ExpireIfNeeded(key);
-  auto* val = keyspace_.FindView(key);
-  if (val != nullptr) {
-    Touch(key);
-  }
-  return val;
+  auto* entry = entries_.FindView(key);
+  if (!entry) return nullptr;
+  entry->lru_clock = current_lru_clock_;
+  return &entry->value;
 }
 
 bool Database::Set(std::string_view key, Value value) {
-  expires_.DeleteView(key);  // SET clears TTL
-  bool result = keyspace_.SetView(key, std::move(value));
-  if (result) {
-    Touch(key);
+  if (auto* existing = entries_.FindView(key);
+      existing && existing->expire_at_ms.has_value()) {
+    volatile_count_--;
   }
-  return result;
+  Entry entry{
+      /*value=*/std::move(value),
+      /*expire_at_ms=*/std::nullopt,
+      /*lru_clock=*/current_lru_clock_,
+  };
+  return entries_.SetView(key, std::move(entry));
 }
 
 bool Database::Rename(std::string_view old_key, std::string_view new_key) {
   std::string old_k(old_key);
   std::string new_k(new_key);
   ExpireIfNeeded(old_key);
-  auto* val_ptr = keyspace_.FindView(old_key);
-  if (!val_ptr) return false;
-  Value& val = *val_ptr;
+  auto* old_entry = entries_.FindView(old_key);
+  if (!old_entry) return false;
+  if (old_k == new_k) return true;
 
-  // Move value
-  Value v = std::move(val);
+  ExpireIfNeeded(new_key);
+  old_entry = entries_.FindView(old_key);
+  if (!old_entry) return false;
 
-  // Migrate TTL
-  int64_t ttl = -1;
-  if (auto* expire_ms_ptr = expires_.FindView(old_key)) {
-    int64_t& expire_ms = *expire_ms_ptr;
-    ttl = expire_ms;
-  }
-
-  // Migrate LRU
-  uint32_t lru_val = current_lru_clock_;
-  if (auto* lr_ptr = lru_.FindView(old_key)) {
-    uint32_t& lr = *lr_ptr;
-    lru_val = lr;
-  }
-
-  keyspace_.DeleteView(old_k);
-  expires_.DeleteView(old_k);
-  lru_.DeleteView(old_k);
-
-  keyspace_.SetView(new_k, std::move(v));
-  lru_.SetView(new_k, lru_val);
-  if (ttl >= 0) {
-    expires_.SetView(new_k, ttl);
-  } else {
-    expires_.DeleteView(new_k);
-  }
+  Entry moved = std::move(*old_entry);
+  DeleteEntry(old_k);
+  DeleteEntry(new_k);
+  if (moved.expire_at_ms.has_value()) volatile_count_++;
+  entries_.Set(std::move(new_k), std::move(moved));
   return true;
 }
 
 bool Database::RenameNX(std::string_view old_key, std::string_view new_key) {
   ExpireIfNeeded(new_key);
-  if (keyspace_.FindView(new_key)) return false;
+  if (entries_.FindView(new_key)) return false;
   return Rename(old_key, new_key);
 }
 
 std::vector<std::string> Database::Keys(std::string_view pattern) {
+  (void)pattern;
   PurgeExpiredKeys(NowMs());
   // Phase 3: only support '*' pattern
   std::vector<std::string> result;
-  for (auto it = keyspace_.begin(); it != keyspace_.end(); ++it) {
+  for (auto it = entries_.begin(); it != entries_.end(); ++it) {
     result.push_back(it->key);
   }
   return result;
@@ -255,53 +255,54 @@ std::vector<std::string> Database::Keys(std::string_view pattern) {
 
 std::optional<std::string> Database::RandomKey() {
   PurgeExpiredKeys(NowMs());
-  return keyspace_.RandomKey();
+  return entries_.RandomKey();
 }
 
 size_t Database::Size() {
   PurgeExpiredKeys(NowMs());
-  return keyspace_.Size();
+  return entries_.Size();
 }
 
-size_t Database::ExpiresSize() const { return expires_.Size(); }
+size_t Database::ExpiresSize() const { return volatile_count_; }
 
 bool Database::SetExpire(std::string_view key, int64_t expire_at_ms) {
   ExpireIfNeeded(key);
-  if (!keyspace_.FindView(key)) return false;
-  expires_.SetView(key, expire_at_ms);
+  auto* entry = entries_.FindView(key);
+  if (!entry) return false;
+  SetEntryExpire(*entry, expire_at_ms);
   return true;
 }
 
 bool Database::Persist(std::string_view key) {
   ExpireIfNeeded(key);
-  if (!keyspace_.FindView(key)) return false;
-  return expires_.DeleteView(key);
+  auto* entry = entries_.FindView(key);
+  if (!entry) return false;
+  bool had_expire = entry->expire_at_ms.has_value();
+  SetEntryExpire(*entry, std::nullopt);
+  return had_expire;
 }
 
 int64_t Database::TTL(std::string_view key) {
-  if (!keyspace_.FindView(key)) return -2;
-  auto* expire_ms = expires_.FindView(key);
-  if (!expire_ms) return -1;
-  int64_t remaining = *expire_ms - NowMs();
+  auto* entry = entries_.FindView(key);
+  if (!entry) return -2;
+  if (!entry->expire_at_ms.has_value()) return -1;
+  int64_t remaining = *entry->expire_at_ms - NowMs();
   if (remaining < 0) {
-    keyspace_.DeleteView(key);
-    expires_.DeleteView(key);
-    lru_.DeleteView(key);
+    DeleteEntry(key);
     return -2;
   }
   return remaining;
 }
 
 bool Database::IsExpired(std::string_view key) const {
-  auto* expire_ms = expires_.FindView(key);
-  if (!expire_ms) return false;
-  return *expire_ms <= NowMs();
+  auto* entry = entries_.FindView(key);
+  if (!entry || !entry->expire_at_ms.has_value()) return false;
+  return *entry->expire_at_ms <= NowMs();
 }
 
 void Database::Clear() {
-  keyspace_.Clear();
-  expires_.Clear();
-  lru_.Clear();
+  entries_.Clear();
+  volatile_count_ = 0;
 }
 
 }  // namespace miniredis

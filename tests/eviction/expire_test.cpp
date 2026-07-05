@@ -132,6 +132,25 @@ TEST(ExpireTest, ExpireSomeHonorsSampleCount) {
   EXPECT_EQ(db.ExpiresSize(), 10u - result.expired);
 }
 
+TEST(ExpireTest, ExpireSomeSamplesOnlyVolatileKeys) {
+  Database db;
+  for (int i = 0; i < 10; ++i) {
+    db.Set("persist:" + std::to_string(i), StringValue("value"));
+    std::string volatile_key = "volatile:" + std::to_string(i);
+    db.Set(volatile_key, StringValue("value"));
+    db.SetExpire(volatile_key, 100);
+  }
+
+  auto result = db.ExpireSome(1000, 3, 0);
+
+  EXPECT_EQ(result.sampled, 3u);
+  EXPECT_EQ(result.expired, 3u);
+  EXPECT_EQ(db.ExpiresSize(), 7u);
+  for (int i = 0; i < 10; ++i) {
+    EXPECT_TRUE(db.Exists("persist:" + std::to_string(i)));
+  }
+}
+
 TEST(ExpireTest, ActiveExpireEffortIncreasesPerCycleWork) {
   MiniRedisConfig low_effort_cfg;
   low_effort_cfg.active_expire_effort = 1;

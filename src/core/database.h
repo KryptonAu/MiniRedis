@@ -79,12 +79,19 @@ class Database {
   void Clear();
 
  private:
-  ds::Dict<std::string, Value> keyspace_;
-  ds::Dict<std::string, int64_t> expires_;
-  ds::Dict<std::string, uint32_t> lru_;
+  struct Entry {
+    Value value;
+    std::optional<int64_t> expire_at_ms;
+    uint32_t lru_clock = 0;
+  };
+
+  ds::Dict<std::string, Entry> entries_;
+  size_t volatile_count_ = 0;
   uint32_t current_lru_clock_ = 0;
 
   bool ExpireIfNeeded(std::string_view key);
+  bool DeleteEntry(std::string_view key);
+  void SetEntryExpire(Entry& entry, std::optional<int64_t> expire_at_ms);
   int64_t NowMs() const;
 };
 

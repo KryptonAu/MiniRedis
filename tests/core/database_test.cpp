@@ -27,8 +27,10 @@ TEST(DatabaseTest, SetClearsTTL) {
   Database db;
   db.Set("key", StringValue("val"));
   db.SetExpire("key", 9999999999999LL);
+  EXPECT_EQ(db.ExpiresSize(), 1u);
   db.Set("key", StringValue("new"));
-  EXPECT_EQ(db.ExpiresSize(), 0);
+  EXPECT_EQ(db.ExpiresSize(), 0u);
+  EXPECT_EQ(db.TTL("key"), -1);
 }
 
 TEST(DatabaseTest, Rename) {
@@ -37,6 +39,48 @@ TEST(DatabaseTest, Rename) {
   EXPECT_TRUE(db.Rename("old", "new"));
   EXPECT_FALSE(db.Exists("old"));
   EXPECT_TRUE(db.Exists("new"));
+}
+
+TEST(DatabaseTest, RenamePreservesTtlAndLruAndAccountsForTargetTtl) {
+  Database db;
+  constexpr int64_t kOldExpire = 9999999999999LL;
+
+  db.SetCurrentLruClock(10);
+  db.Set("old", StringValue("old"));
+  db.SetExpire("old", kOldExpire);
+
+  db.SetCurrentLruClock(20);
+  db.Set("new", StringValue("new"));
+  db.SetExpire("new", 8888888888888LL);
+  ASSERT_EQ(db.ExpiresSize(), 2u);
+
+  EXPECT_TRUE(db.Rename("old", "new"));
+
+  EXPECT_FALSE(db.Exists("old"));
+  EXPECT_TRUE(db.Exists("new"));
+  EXPECT_EQ(db.ExpiresSize(), 1u);
+  EXPECT_EQ(db.ExpireAt("new"), kOldExpire);
+  EXPECT_EQ(db.LruOf("new"), 10u);
+}
+
+TEST(DatabaseTest, DeletePersistAndLazyExpireMaintainExpiresSize) {
+  Database db;
+  db.Set("delete", StringValue("value"));
+  db.SetExpire("delete", 9999999999999LL);
+  db.Set("persist", StringValue("value"));
+  db.SetExpire("persist", 9999999999999LL);
+  db.Set("expired", StringValue("value"));
+  db.SetExpire("expired", 0);
+  ASSERT_EQ(db.ExpiresSize(), 3u);
+
+  EXPECT_TRUE(db.Delete("delete"));
+  EXPECT_EQ(db.ExpiresSize(), 2u);
+
+  EXPECT_TRUE(db.Persist("persist"));
+  EXPECT_EQ(db.ExpiresSize(), 1u);
+
+  EXPECT_EQ(db.Find("expired"), nullptr);
+  EXPECT_EQ(db.ExpiresSize(), 0u);
 }
 
 // Regression: Persist on expired key without prior Exists must not resurrect
