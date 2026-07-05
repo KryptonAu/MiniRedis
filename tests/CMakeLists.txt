@@ -77,3 +77,9 @@ add_executable(miniredis_eviction_test
 target_link_libraries(miniredis_eviction_test PRIVATE miniredis_eviction miniredis_core GTest::gtest_main)
 target_compile_features(miniredis_eviction_test PRIVATE cxx_std_20)
 gtest_discover_tests(miniredis_eviction_test)
+
+add_executable(miniredis_eviction_bench
+    eviction/eviction_bench.cpp
+)
+target_link_libraries(miniredis_eviction_bench PRIVATE miniredis_eviction miniredis_core)
+target_compile_features(miniredis_eviction_bench PRIVATE cxx_std_20)

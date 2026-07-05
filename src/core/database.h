@@ -22,6 +22,11 @@ struct KeyView {
 
 using KeyVisitor = std::function<void(const KeyView&)>;
 
+struct ExpireSampleResult {
+  size_t sampled = 0;
+  size_t expired = 0;
+};
+
 class Database {
  public:
   Database();
@@ -50,6 +55,7 @@ class Database {
 
   // Purge all expired keys; returns the number of keys removed.
   size_t PurgeExpiredKeys(int64_t now_ms);
+  ExpireSampleResult ExpireSome(int64_t now_ms, size_t count, uint64_t seed);
 
   // Traversal / sampling (public, for persistence/eviction modules).
   void ForEachKey(KeyVisitor visitor);
@@ -63,6 +69,7 @@ class Database {
 
   // Approximate memory usage of this database (keys + values + metadata).
   size_t ApproxMemoryUsage() const;
+  std::optional<size_t> ApproxMemoryUsageOf(std::string_view key) const;
 
   // LRU tracking.
   void SetCurrentLruClock(uint32_t clock);

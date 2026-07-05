@@ -1,6 +1,9 @@
 #include "eviction/evict.h"
 
 #include <algorithm>
+#include <array>
+#include <optional>
+#include <vector>
 
 #include "core/database.h"
 #include "core/server.h"
@@ -25,41 +28,51 @@ struct EvictionPoolEntry {
   unsigned long long idle = 0;
   std::string key;
   int dbid = 0;
+
+  bool Empty() const { return key.empty(); }
+  void Clear() {
+    idle = 0;
+    key.clear();
+    dbid = 0;
+  }
 };
 
 // Fill the eviction pool with candidate keys sorted by idle time (ascending).
 // The pool has the least-idle entry at position 0 and most-idle at the end.
-void EvictionPoolPopulate(int dbid, Database& db,
+bool EvictionPoolPopulate(int dbid, Database& db,
                           const std::vector<std::string>& samples,
-                          uint32_t lru_clock, EvictionPoolEntry* pool) {
+                          uint32_t lru_clock,
+                          std::array<EvictionPoolEntry, kEvpoolSize>& pool) {
+  bool inserted = false;
   for (const auto& key : samples) {
     auto lr = db.LruOf(key);
     if (!lr.has_value()) continue;
     auto idle = EstimateIdleTime(lru_clock, *lr);
 
-    // Find insertion position (ascending order by idle).
-    int pos = 0;
-    while (pos < kEvpoolSize && pool[pos].key.empty() == false &&
-           pool[pos].idle < idle) {
-      pos++;
+    if (!pool[0].Empty() && !pool.back().Empty() && idle <= pool[0].idle) {
+      continue;
     }
 
-    if (pos == 0 && !pool[0].key.empty() && pool[0].idle >= idle) {
-      continue;  // Not better than any existing entry.
+    std::vector<EvictionPoolEntry> entries;
+    entries.reserve(kEvpoolSize + 1);
+    for (const auto& entry : pool) {
+      if (!entry.Empty()) entries.push_back(entry);
+    }
+    entries.push_back({idle, key, dbid});
+    std::sort(
+        entries.begin(), entries.end(),
+        [](const auto& lhs, const auto& rhs) { return lhs.idle < rhs.idle; });
+    if (entries.size() > kEvpoolSize) {
+      entries.erase(entries.begin());
     }
 
-    // Shift entries right and insert.
-    int shift = kEvpoolSize - 1;
-    if (pool[shift].key.empty() == false) {
-      shift--;
+    for (auto& entry : pool) entry.Clear();
+    for (size_t i = 0; i < entries.size(); ++i) {
+      pool[i] = std::move(entries[i]);
     }
-    for (int i = shift; i > pos; i--) {
-      pool[i] = std::move(pool[i - 1]);
-    }
-    pool[pos].idle = idle;
-    pool[pos].key = key;
-    pool[pos].dbid = dbid;
+    inserted = true;
   }
+  return inserted;
 }
 
 // Get maxmemory policy as enum from config.
@@ -69,6 +82,13 @@ Policy ParsePolicy(const std::string& s) {
   if (s == "allkeys_lru") return Policy::kAllKeysLru;
   if (s == "volatile_lru") return Policy::kVolatileLru;
   return Policy::kNoEviction;
+}
+
+int BestCandidateIndex(const std::array<EvictionPoolEntry, kEvpoolSize>& pool) {
+  for (int i = kEvpoolSize - 1; i >= 0; i--) {
+    if (!pool[static_cast<size_t>(i)].Empty()) return i;
+  }
+  return -1;
 }
 
 }  // namespace
@@ -87,52 +107,50 @@ EvictionResult PerformEvictions(Server& server) {
   int samples_per_iter = server.GetConfig().maxmemory_samples;
   int db_count = server.DbCount();
 
-  EvictionPoolEntry pool[kEvpoolSize];
+  std::array<EvictionPoolEntry, kEvpoolSize> pool;
+  uint64_t sample_seed = 0;
 
   // Evict until memory is below limit, or we can't evict anymore.
-  for (int attempt = 0; attempt < 256; attempt++) {
-    // Populate eviction pool from each DB.
-    for (int dbid = 0; dbid < db_count; dbid++) {
-      Database* db = server.GetDb(dbid);
-      if (!db || db->Size() == 0) continue;
-
+  while (mem_used > maxmemory) {
+    int best_idx = BestCandidateIndex(pool);
+    if (best_idx < 0) {
+      bool inserted = false;
       bool only_volatile = (policy == Policy::kVolatileLru);
-      if (only_volatile && db->ExpiresSize() == 0) continue;
+      for (int dbid = 0; dbid < db_count; dbid++) {
+        Database* db = server.GetDb(dbid);
+        if (!db) continue;
+        if (only_volatile && db->ExpiresSize() == 0) continue;
 
-      auto samples =
-          db->SampleKeys(static_cast<size_t>(samples_per_iter), only_volatile,
-                         static_cast<uint64_t>(attempt * db_count + dbid));
-      EvictionPoolPopulate(dbid, *db, samples, lru_clock, pool);
-    }
-
-    // Find best candidate (rightmost non-empty entry in pool).
-    int best_idx = -1;
-    for (int i = kEvpoolSize - 1; i >= 0; i--) {
-      if (!pool[i].key.empty()) {
-        best_idx = i;
-        break;
+        auto samples = db->SampleKeys(static_cast<size_t>(samples_per_iter),
+                                      only_volatile, sample_seed++);
+        inserted |= EvictionPoolPopulate(dbid, *db, samples, lru_clock, pool);
       }
-    }
 
-    if (best_idx < 0) return EvictionResult::kNoMemory;
+      best_idx = BestCandidateIndex(pool);
+      if (!inserted || best_idx < 0) return EvictionResult::kNoMemory;
+    }
 
     // Delete the best candidate.
-    int target_db = pool[best_idx].dbid;
-    std::string key_to_delete = pool[best_idx].key;
-    pool[best_idx].key.clear();
-    pool[best_idx].idle = 0;
+    auto& candidate = pool[static_cast<size_t>(best_idx)];
+    int target_db = candidate.dbid;
+    std::string key_to_delete = std::move(candidate.key);
+    candidate.Clear();
 
     Database* db = server.GetDb(target_db);
     if (db) {
-      db->Delete(key_to_delete);
-      server.IncrementEvicted(1);
+      std::optional<size_t> freed = db->ApproxMemoryUsageOf(key_to_delete);
+      if (db->Delete(key_to_delete)) {
+        if (freed.has_value()) {
+          mem_used = *freed >= mem_used ? 0 : mem_used - *freed;
+        } else {
+          mem_used = server.ApproxMemoryUsage();
+        }
+        server.IncrementEvicted(1);
+      }
     }
-
-    mem_used = server.ApproxMemoryUsage();
-    if (mem_used <= maxmemory) return EvictionResult::kOk;
   }
 
-  return EvictionResult::kNoMemory;
+  return EvictionResult::kOk;
 }
 
 bool ShouldRejectWriteForOom(const Server& server, bool is_write_command) {

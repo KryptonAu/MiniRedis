@@ -1,5 +1,6 @@
 #include "eviction/expire.h"
 
+#include <algorithm>
 #include <chrono>
 
 #include "core/database.h"
@@ -15,6 +16,12 @@ int64_t NowUs() {
       std::chrono::duration_cast<std::chrono::microseconds>(now).count());
 }
 
+int ClampEffort(int effort) {
+  if (effort < 1) return 1;
+  if (effort > 10) return 10;
+  return effort;
+}
+
 }  // namespace
 
 size_t ActiveExpireCycle(Server& server, int64_t now_ms,
@@ -27,10 +34,16 @@ size_t ActiveExpireCycle(Server& server, int64_t now_ms,
   // mirrors Redis's static current_db).
   static int current_db = 0;
 
+  int effort = ClampEffort(server.GetConfig().active_expire_effort);
+  int base_keys_per_loop = std::max(config.keys_per_loop, 1);
+  size_t keys_per_loop =
+      static_cast<size_t>(base_keys_per_loop + (effort - 1) * 5);
+  int slow_time_perc = config.slow_time_perc + (effort - 1) * 2;
+
   int64_t start_us = NowUs();
   int64_t timelimit_us = static_cast<int64_t>(
       server.GetConfig().hz > 0
-          ? (1000 / server.GetConfig().hz) * 1000 * config.slow_time_perc / 100
+          ? (1000 / server.GetConfig().hz) * 1000 * slow_time_perc / 100
           : config.fast_duration_us);
   if (timelimit_us <= 0) timelimit_us = 1000;
 
@@ -46,32 +59,20 @@ size_t ActiveExpireCycle(Server& server, int64_t now_ms,
     Database* db = server.GetDb(db_idx);
     if (!db || db->ExpiresSize() == 0) continue;
 
-    size_t sampled = 0;
-    size_t expired = 0;
     int iteration = 0;
 
     do {
       if (NowUs() - start_us > timelimit_us) break;
 
-      // Sample keys from expires_ dict.
-      auto samples = db->SampleKeys(
-          static_cast<size_t>(config.keys_per_loop), /*only_volatile=*/true,
-          static_cast<uint64_t>(start_us + iteration));
-      sampled += samples.size();
-
-      for (const auto& key : samples) {
-        auto expire_at = db->ExpireAt(key);
-        if (expire_at.has_value() && *expire_at <= now_ms) {
-          db->Delete(key);
-          expired++;
-        }
-      }
-      total_expired += expired;
-      server.IncrementExpired(expired);
+      auto result = db->ExpireSome(now_ms, keys_per_loop,
+                                   static_cast<uint64_t>(start_us + iteration));
+      total_expired += result.expired;
+      server.IncrementExpired(result.expired);
       iteration++;
 
       // If expire ratio > 10%, keep scanning this DB.
-    } while (sampled > 0 && expired * 10 > sampled && iteration < 100);
+      if (result.sampled == 0 || result.expired * 10 <= result.sampled) break;
+    } while (iteration < 100);
   }
 
   return total_expired;

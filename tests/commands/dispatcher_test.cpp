@@ -158,6 +158,26 @@ TEST(DispatcherTest, NoEvictionRejectsWritesWhenAlreadyOverMaxmemory) {
   EXPECT_EQ(h.server.Stats().dirty, 1u);
 }
 
+TEST(DispatcherTest, NoEvictionAllowsPersistWhenAlreadyOverMaxmemory) {
+  auto reg = CreateDefaultCommandRegistry();
+  CommandTestHarness h;
+  std::string large_value(256, 'x');
+  EXPECT_EQ(h.Call(reg, {"SET", "existing", large_value}), "+OK\r\n");
+  EXPECT_EQ(h.Call(reg, {"EXPIRE", "existing", "60"}), ":1\r\n");
+  ASSERT_TRUE(h.server.ApplyConfig("maxmemory", "1"));
+  ASSERT_TRUE(h.server.ApplyConfig("maxmemory-policy", "noeviction"));
+  h.server.ResetDirty();
+
+  auto ctx = h.Context();
+  auto result = ExecuteCommandDetailed(reg, ctx, {"PERSIST", "existing"});
+
+  EXPECT_TRUE(result.ok);
+  EXPECT_TRUE(result.mutated);
+  EXPECT_EQ(result.reply, ":1\r\n");
+  EXPECT_EQ(h.server.GetDb(0)->TTL("existing"), -1);
+  EXPECT_EQ(h.server.Stats().dirty, 1u);
+}
+
 TEST(DispatcherTest, ReplayModeDoesNotIncrementDirtyOrPropagate) {
   CommandRegistry reg;
   reg.Register(

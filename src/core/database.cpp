@@ -37,6 +37,25 @@ size_t Database::PurgeExpiredKeys(int64_t now_ms) {
   return removed;
 }
 
+ExpireSampleResult Database::ExpireSome(int64_t now_ms, size_t count,
+                                        uint64_t seed) {
+  ExpireSampleResult result;
+  if (count == 0 || expires_.Size() == 0) return result;
+
+  auto samples = expires_.GetSomeKeys(count, seed);
+  result.sampled = samples.size();
+  for (auto* entry : samples) {
+    std::string key = entry->key;
+    if (entry->value > now_ms) continue;
+    expires_.DeleteView(key);
+    lru_.DeleteView(key);
+    if (keyspace_.DeleteView(key)) {
+      result.expired++;
+    }
+  }
+  return result;
+}
+
 void Database::ForEachKey(KeyVisitor visitor) {
   PurgeExpiredKeys(NowMs());
   for (auto it = keyspace_.begin(); it != keyspace_.end(); ++it) {
@@ -107,6 +126,19 @@ size_t Database::ApproxMemoryUsage() const {
   total += keyspace_.Size() * 32;
   total += expires_.Size() * 24;
   total += lru_.Size() * 12;
+  return total;
+}
+
+std::optional<size_t> Database::ApproxMemoryUsageOf(
+    std::string_view key) const {
+  auto* value = keyspace_.FindView(key);
+  if (!value) return std::nullopt;
+
+  size_t total = key.size();
+  total += miniredis::ApproxMemoryUsage(*value);
+  total += 32;
+  if (expires_.FindView(key)) total += 24;
+  if (lru_.FindView(key)) total += 12;
   return total;
 }
 
