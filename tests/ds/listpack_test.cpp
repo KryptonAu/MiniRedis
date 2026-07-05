@@ -1,9 +1,14 @@
-#include <gtest/gtest.h>
-
 #include "ds/listpack.h"
+
+#include <gtest/gtest.h>
 
 namespace miniredis::ds {
 namespace {
+
+uint16_t HeaderCount(const Listpack& lp) {
+  const uint8_t* data = lp.Data();
+  return static_cast<uint16_t>(data[4]) | (static_cast<uint16_t>(data[5]) << 8);
+}
 
 // ===== Construction =====
 TEST(ListpackTest, ConstructEmpty) {
@@ -280,9 +285,19 @@ TEST(ListpackTest, GetOutOfBounds) {
 
 TEST(ListpackTest, DeleteOutOfBounds) {
   Listpack lp;
+  size_t empty_total_bytes = lp.TotalBytes();
+  uint16_t empty_count = HeaderCount(lp);
   EXPECT_FALSE(lp.Delete(0));
+  EXPECT_EQ(lp.TotalBytes(), empty_total_bytes);
+  EXPECT_EQ(HeaderCount(lp), empty_count);
+
   lp.Append(1);
+  size_t single_total_bytes = lp.TotalBytes();
+  uint16_t single_count = HeaderCount(lp);
   EXPECT_FALSE(lp.Delete(1));
+  EXPECT_EQ(lp.TotalBytes(), single_total_bytes);
+  EXPECT_EQ(HeaderCount(lp), single_count);
+  EXPECT_EQ(lp.Size(), 1);
 }
 
 // ===== Serialization round-trip =====
@@ -340,6 +355,36 @@ TEST(ListpackTest, FromBytesAcceptsUint16MaxNumele) {
   EXPECT_EQ(result->Size(), 2);  // actual count from scanning
 }
 
+TEST(ListpackTest, MutatingUnknownNumeleKeepsUnknownCountHeader) {
+  Listpack lp;
+  lp.Append(1);
+  lp.Append(2);
+
+  std::vector<uint8_t> blob(lp.Data(), lp.Data() + lp.DataSize());
+  blob[4] = 0xFF;
+  blob[5] = 0xFF;
+
+  auto result = Listpack::FromBytes(std::move(blob));
+  ASSERT_TRUE(result.has_value());
+  ASSERT_EQ(HeaderCount(*result), UINT16_MAX);
+
+  EXPECT_TRUE(result->Append(3));
+  EXPECT_EQ(HeaderCount(*result), UINT16_MAX);
+  EXPECT_EQ(result->Size(), 3);
+  EXPECT_EQ(result->TotalBytes(), result->DataSize());
+
+  EXPECT_TRUE(result->Delete(1));
+  EXPECT_EQ(HeaderCount(*result), UINT16_MAX);
+  EXPECT_EQ(result->Size(), 2);
+  EXPECT_EQ(result->GetInteger(0).value(), 1);
+  EXPECT_EQ(result->GetInteger(1).value(), 3);
+
+  auto round_trip = Listpack::FromBytes(std::vector<uint8_t>(
+      result->Data(), result->Data() + result->DataSize()));
+  ASSERT_TRUE(round_trip.has_value());
+  EXPECT_EQ(round_trip->Size(), 2);
+}
+
 // ===== Large data performance =====
 TEST(ListpackTest, LargeNumberOfEntries) {
   Listpack lp;
@@ -349,6 +394,42 @@ TEST(ListpackTest, LargeNumberOfEntries) {
   EXPECT_EQ(lp.Size(), 1000);
   EXPECT_EQ(lp.GetInteger(0).value(), 0);
   EXPECT_EQ(lp.GetInteger(999).value(), 999);
+}
+
+TEST(ListpackTest, LargeMutationsMaintainHeaderIncrementally) {
+  Listpack lp;
+  for (int i = 0; i < 2000; i++) {
+    ASSERT_TRUE(lp.Append(i));
+    ASSERT_EQ(HeaderCount(lp), i + 1);
+    ASSERT_EQ(lp.TotalBytes(), lp.DataSize());
+  }
+
+  for (int i = 0; i < 500; i++) {
+    ASSERT_TRUE(lp.Delete(0));
+    ASSERT_EQ(HeaderCount(lp), 1999 - i);
+    ASSERT_EQ(lp.TotalBytes(), lp.DataSize());
+  }
+
+  for (int i = 0; i < 100; i++) {
+    ASSERT_TRUE(lp.Replace(static_cast<size_t>(i),
+                           std::string_view("replacement-value")));
+    ASSERT_EQ(HeaderCount(lp), 1500);
+    ASSERT_EQ(lp.TotalBytes(), lp.DataSize());
+  }
+
+  ASSERT_EQ(lp.Size(), 1500);
+  EXPECT_EQ(lp.GetString(0).value(), "replacement-value");
+  EXPECT_EQ(lp.GetString(99).value(), "replacement-value");
+  EXPECT_EQ(lp.GetInteger(100).value(), 600);
+  EXPECT_EQ(lp.GetInteger(1499).value(), 1999);
+
+  auto round_trip = Listpack::FromBytes(
+      std::vector<uint8_t>(lp.Data(), lp.Data() + lp.DataSize()));
+  ASSERT_TRUE(round_trip.has_value());
+  EXPECT_EQ(round_trip->Size(), 1500);
+  EXPECT_EQ(round_trip->TotalBytes(), round_trip->DataSize());
+  EXPECT_EQ(round_trip->GetString(0).value(), "replacement-value");
+  EXPECT_EQ(round_trip->GetInteger(1499).value(), 1999);
 }
 
 }  // namespace

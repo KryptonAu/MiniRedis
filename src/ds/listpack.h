@@ -65,7 +65,9 @@ class Listpack {
   size_t DecodeBacklenEndingAt(size_t pos) const;
   size_t EncodedPayloadSizeAt(size_t pos) const;
   size_t EntrySizeAt(size_t pos) const;
-  void UpdateHeader();
+  void SetHeader(size_t total_bytes, uint16_t count_header);
+  void SetTotalBytesFromBuffer();
+  void AdjustHeaderCount(int delta);
   static bool ValidateBytes(std::span<const uint8_t> data);
 };
 

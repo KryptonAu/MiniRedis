@@ -271,7 +271,7 @@ Listpack::Listpack() {
   // Initialize with 6-byte header + 1-byte EOF
   buf_.resize(kHdrSize + 1);
   buf_[kHdrSize] = kEof;
-  UpdateHeader();
+  SetHeader(buf_.size(), 0);
 }
 
 // static
@@ -435,7 +435,8 @@ bool Listpack::Insert(size_t index, std::string_view value) {
   // Write backlen
   EncodeBacklen(buf_.data() + insert_pos + payload_size, payload_size);
 
-  UpdateHeader();
+  SetTotalBytesFromBuffer();
+  AdjustHeaderCount(1);
   return true;
 }
 
@@ -470,7 +471,8 @@ bool Listpack::Insert(size_t index, int64_t value) {
   // Write backlen
   EncodeBacklen(buf_.data() + insert_pos + payload_size, payload_size);
 
-  UpdateHeader();
+  SetTotalBytesFromBuffer();
+  AdjustHeaderCount(1);
   return true;
 }
 
@@ -484,7 +486,8 @@ bool Listpack::Delete(size_t index) {
 
   buf_.erase(buf_.begin() + static_cast<long>(pos),
              buf_.begin() + static_cast<long>(pos + entry_size));
-  UpdateHeader();
+  SetTotalBytesFromBuffer();
+  AdjustHeaderCount(-1);
   return true;
 }
 
@@ -635,18 +638,33 @@ size_t Listpack::EntrySizeAt(size_t pos) const {
   return payload + backlen_size;
 }
 
-void Listpack::UpdateHeader() {
+void Listpack::SetHeader(size_t total_bytes, uint16_t count_header) {
   if (buf_.size() < kHdrSize + 1) return;
+  StoreLE32(buf_.data(), static_cast<uint32_t>(total_bytes));
+  StoreLE16(buf_.data() + 4, count_header);
+}
+
+void Listpack::SetTotalBytesFromBuffer() {
+  if (buf_.size() < kHdrSize) return;
   StoreLE32(buf_.data(), static_cast<uint32_t>(buf_.size()));
-  // Scan to count entries
-  size_t count = 0;
-  size_t pos = kHdrSize;
-  while (pos < buf_.size() && buf_[pos] != kEof) {
-    count++;
-    pos += EntrySizeAt(pos);
+}
+
+void Listpack::AdjustHeaderCount(int delta) {
+  if (buf_.size() < kHdrSize + 1) return;
+
+  uint16_t count = LoadLE16(buf_.data() + 4);
+  if (count == UINT16_MAX) return;
+
+  if (delta > 0) {
+    size_t next = static_cast<size_t>(count) + static_cast<size_t>(delta);
+    StoreLE16(buf_.data() + 4,
+              next >= UINT16_MAX ? UINT16_MAX : static_cast<uint16_t>(next));
+    return;
   }
+
+  size_t decrement = static_cast<size_t>(-delta);
   StoreLE16(buf_.data() + 4,
-            count > UINT16_MAX ? UINT16_MAX : static_cast<uint16_t>(count));
+            decrement >= count ? 0 : static_cast<uint16_t>(count - decrement));
 }
 
 // static
