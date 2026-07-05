@@ -1,7 +1,9 @@
 #include "types/string_value.h"
 
 #include <algorithm>
+#include <charconv>
 #include <limits>
+#include <system_error>
 
 #include "types/numeric_parse.h"
 
@@ -16,6 +18,17 @@ StringValue::StringValue(int64_t value) : value_(value) {}
 std::string StringValue::ToString() const {
   if (auto* i = std::get_if<int64_t>(&value_)) {
     return std::to_string(*i);
+  }
+  return std::get<std::string>(value_);
+}
+
+std::string_view StringValue::ToStringView(StringViewScratch& scratch) const {
+  if (auto* i = std::get_if<int64_t>(&value_)) {
+    auto [ptr, ec] =
+        std::to_chars(scratch.data(), scratch.data() + scratch.size(), *i);
+    if (ec != std::errc()) return {};
+    return std::string_view(scratch.data(),
+                            static_cast<size_t>(ptr - scratch.data()));
   }
   return std::get<std::string>(value_);
 }
@@ -41,7 +54,10 @@ ValueEncoding StringValue::Encoding() const {
   return ValueEncoding::kRaw;
 }
 
-size_t StringValue::Length() const { return ToString().size(); }
+size_t StringValue::Length() const {
+  StringViewScratch scratch;
+  return ToStringView(scratch).size();
+}
 
 void StringValue::Set(std::string_view value) {
   auto parsed = ParseCanonicalInt(value);
@@ -71,7 +87,8 @@ void StringValue::SetRange(size_t offset, std::string_view value) {
 }
 
 std::string StringValue::GetRange(long long start, long long end) const {
-  std::string s = ToString();
+  StringViewScratch scratch;
+  std::string_view s = ToStringView(scratch);
   long long len = static_cast<long long>(s.size());
   if (len == 0) return "";
 
@@ -81,8 +98,8 @@ std::string StringValue::GetRange(long long start, long long end) const {
   if (start > end || start >= len) return "";
 
   end = std::min(end, len - 1);
-  return s.substr(static_cast<size_t>(start),
-                  static_cast<size_t>(end - start + 1));
+  return std::string(s.substr(static_cast<size_t>(start),
+                              static_cast<size_t>(end - start + 1)));
 }
 
 TypeResult<int64_t> StringValue::IncrementBy(int64_t delta) {
@@ -90,7 +107,8 @@ TypeResult<int64_t> StringValue::IncrementBy(int64_t delta) {
   if (auto* i = std::get_if<int64_t>(&value_)) {
     current = *i;
   } else {
-    auto parsed = ParseCanonicalInt(ToString());
+    StringViewScratch scratch;
+    auto parsed = ParseCanonicalInt(ToStringView(scratch));
     if (std::holds_alternative<TypeError>(parsed)) {
       return std::get<TypeError>(parsed);
     }
@@ -108,8 +126,8 @@ TypeResult<int64_t> StringValue::IncrementBy(int64_t delta) {
 }
 
 TypeResult<double> StringValue::IncrementByFloat(double delta) {
-  std::string s = ToString();
-  auto parsed = ParseFiniteDouble(s);
+  StringViewScratch scratch;
+  auto parsed = ParseFiniteDouble(ToStringView(scratch));
   if (std::holds_alternative<TypeError>(parsed)) {
     return std::get<TypeError>(parsed);
   }
@@ -126,7 +144,9 @@ TypeResult<double> StringValue::IncrementByFloat(double delta) {
 }
 
 bool StringValue::operator==(const StringValue& other) const {
-  return ToString() == other.ToString();
+  StringViewScratch lhs_scratch;
+  StringViewScratch rhs_scratch;
+  return ToStringView(lhs_scratch) == other.ToStringView(rhs_scratch);
 }
 
 }  // namespace miniredis

@@ -7,7 +7,9 @@
 #include <cerrno>
 #include <cstdio>
 #include <fstream>
+#include <initializer_list>
 #include <sstream>
+#include <string_view>
 
 #include "core/database.h"
 #include "core/server.h"
@@ -113,10 +115,23 @@ void AppendKeyValueToAof(const KeyView& kv, std::string& data) {
   ValueType type = GetType(kv.value);
   std::string key(kv.key);
 
+  auto append_resp_arg = [&](std::string_view arg) {
+    data += "$" + std::to_string(arg.size()) + "\r\n";
+    data.append(arg);
+    data += "\r\n";
+  };
+
   auto append_resp = [&](const std::vector<std::string>& args) {
     data += "*" + std::to_string(args.size()) + "\r\n";
     for (const auto& a : args) {
-      data += "$" + std::to_string(a.size()) + "\r\n" + a + "\r\n";
+      append_resp_arg(a);
+    }
+  };
+
+  auto append_resp_views = [&](std::initializer_list<std::string_view> args) {
+    data += "*" + std::to_string(args.size()) + "\r\n";
+    for (std::string_view a : args) {
+      append_resp_arg(a);
     }
   };
 
@@ -124,7 +139,8 @@ void AppendKeyValueToAof(const KeyView& kv, std::string& data) {
     case ValueType::kString: {
       auto* sv = std::get_if<StringValue>(&kv.value);
       if (!sv) break;
-      append_resp({"SET", key, sv->ToString()});
+      StringValue::StringViewScratch scratch;
+      append_resp_views({"SET", key, sv->ToStringView(scratch)});
       break;
     }
     case ValueType::kList: {

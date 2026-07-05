@@ -48,6 +48,44 @@ TEST(StringValueTest, ConstructFromPlainString) {
   EXPECT_EQ(sv.AsString().value(), "hello");
 }
 
+TEST(StringValueTest, ToStringViewUsesRawStringStorage) {
+  StringValue sv("hello");
+  auto raw = sv.AsString().value();
+  StringValue::StringViewScratch scratch;
+
+  std::string_view view = sv.ToStringView(scratch);
+
+  EXPECT_EQ(view, "hello");
+  EXPECT_EQ(view.data(), raw.data());
+}
+
+TEST(StringValueTest, ToStringViewFormatsEmbeddedInts) {
+  StringValue::StringViewScratch scratch;
+
+  StringValue positive(42);
+  EXPECT_EQ(positive.ToStringView(scratch), "42");
+
+  StringValue min_value(std::numeric_limits<int64_t>::min());
+  EXPECT_EQ(min_value.ToStringView(scratch),
+            std::to_string(std::numeric_limits<int64_t>::min()));
+
+  StringValue max_value(std::numeric_limits<int64_t>::max());
+  EXPECT_EQ(max_value.ToStringView(scratch),
+            std::to_string(std::numeric_limits<int64_t>::max()));
+}
+
+TEST(StringValueTest, ToStringViewPreservesNonCanonicalRawString) {
+  StringValue sv("001");
+  auto raw = sv.AsString().value();
+  StringValue::StringViewScratch scratch;
+
+  std::string_view view = sv.ToStringView(scratch);
+
+  EXPECT_EQ(sv.Encoding(), ValueEncoding::kRaw);
+  EXPECT_EQ(view, "001");
+  EXPECT_EQ(view.data(), raw.data());
+}
+
 // ===== Set =====
 TEST(StringValueTest, SetChangesEncoding) {
   StringValue sv("hello");

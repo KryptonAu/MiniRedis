@@ -94,7 +94,8 @@ void RdbSerializer::SaveFooter() {
 void RdbSerializer::SaveType(uint8_t type_byte) { WriteUint8(type_byte); }
 
 void RdbSerializer::SaveStringValue(const StringValue& sv) {
-  WriteString(sv.ToString());
+  StringValue::StringViewScratch scratch;
+  WriteString(sv.ToStringView(scratch));
 }
 
 void RdbSerializer::SaveListValue(const ListValue& lv) {

@@ -52,7 +52,8 @@ static std::string GetCmd(CommandContext& ctx, CommandArgs args) {
   auto lookup = LookupKeyAs<StringValue>(ctx.db, args[1]);
   if (lookup.Missing()) return RespReply::Nil();
   if (lookup.WrongType()) return RespReply::WrongType();
-  return RespReply::BulkString(lookup.value->ToString());
+  StringValue::StringViewScratch scratch;
+  return RespReply::BulkString(lookup.value->ToStringView(scratch));
 }
 
 static std::string SetCmd(CommandContext& ctx, CommandArgs args) {
@@ -118,7 +119,8 @@ static std::string GetExCmd(CommandContext& ctx, CommandArgs args) {
   auto lookup = LookupKeyAs<StringValue>(ctx.db, args[1]);
   if (lookup.Missing()) return RespReply::Nil();
   if (lookup.WrongType()) return RespReply::WrongType();
-  return RespReply::BulkString(lookup.value->ToString());
+  StringValue::StringViewScratch scratch;
+  return RespReply::BulkString(lookup.value->ToStringView(scratch));
 }
 
 static std::string AppendCmd(CommandContext& ctx, CommandArgs args) {
@@ -197,7 +199,8 @@ static std::string IncrByFloatCmd(CommandContext& ctx, CommandArgs args) {
   auto result = existing.IncrementByFloat(delta);
   if (std::holds_alternative<TypeError>(result))
     return TypeErrorToResp(std::get<TypeError>(result));
-  return RespReply::BulkString(existing.ToString());
+  StringValue::StringViewScratch scratch;
+  return RespReply::BulkString(existing.ToStringView(scratch));
 }
 
 static std::string MGetCmd(CommandContext& ctx, CommandArgs args) {
@@ -208,7 +211,8 @@ static std::string MGetCmd(CommandContext& ctx, CommandArgs args) {
     if (!lookup.value) {
       RespReply::AppendNullBulkString(result);
     } else {
-      RespReply::AppendBulkString(result, lookup.value->ToString());
+      StringValue::StringViewScratch scratch;
+      RespReply::AppendBulkString(result, lookup.value->ToStringView(scratch));
     }
   }
   return result;

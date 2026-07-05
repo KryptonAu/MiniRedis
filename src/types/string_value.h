@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -14,6 +15,7 @@ namespace miniredis {
 class StringValue {
  public:
   using Storage = std::variant<int64_t, std::string>;
+  using StringViewScratch = std::array<char, 32>;
 
   StringValue();
   explicit StringValue(std::string_view value);
@@ -26,6 +28,7 @@ class StringValue {
   StringValue& operator=(StringValue&&) noexcept = default;
 
   std::string ToString() const;
+  std::string_view ToStringView(StringViewScratch& scratch) const;
   std::optional<std::string_view> AsString() const;
   std::optional<int64_t> AsInt() const;
   ValueEncoding Encoding() const;
