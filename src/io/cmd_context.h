@@ -1,8 +1,10 @@
 #pragma once
 
 #include <atomic>
+#include <bit>
 #include <cstddef>
 #include <functional>
+#include <limits>
 #include <stdexec/execution.hpp>
 #include <thread>
 #include <utility>
@@ -128,13 +130,25 @@ class CmdContext {
   CmdOpBase* TryDequeue() noexcept;
   void WakeConsumer() noexcept;
   void FinishEnqueue() noexcept;
+  static size_t NormalizeQueueCapacity(size_t queue_capacity) noexcept;
+
+  static constexpr size_t kCacheLineSize = 64;
+
+  struct alignas(kCacheLineSize) PaddedAtomicSize {
+    std::atomic<size_t> value{0};
+  };
+
+  struct alignas(kCacheLineSize) PaddedAtomicBool {
+    std::atomic<bool> value{false};
+  };
 
   std::vector<CmdOpBase*> queue_;
-  std::atomic<size_t> head_{0};
-  std::atomic<size_t> tail_{0};
-  std::atomic<size_t> wake_sequence_{0};
-  std::atomic<size_t> active_enqueues_{0};
-  std::atomic<bool> stopping_{false};
+  size_t queue_mask_ = 0;
+  PaddedAtomicSize head_;
+  PaddedAtomicSize tail_;
+  PaddedAtomicSize wake_sequence_;
+  PaddedAtomicSize active_enqueues_;
+  PaddedAtomicBool stopping_;
   std::thread::id cmd_thread_id_{};
 };
 
@@ -174,7 +188,8 @@ inline void CmdScheduleOpState<Rcvr>::start() & noexcept {
 // Inline implementations
 // ===========================================================================
 inline CmdContext::CmdContext(size_t queue_capacity)
-    : queue_(queue_capacity == 0 ? 1 : queue_capacity, nullptr) {}
+    : queue_(NormalizeQueueCapacity(queue_capacity), nullptr),
+      queue_mask_(queue_.size() - 1) {}
 
 inline void CmdContext::Run() {
   cmd_thread_id_ = std::this_thread::get_id();
@@ -185,24 +200,25 @@ inline void CmdContext::Run() {
       continue;
     }
 
-    if (stopping_.load(std::memory_order_acquire) &&
-        active_enqueues_.load(std::memory_order_acquire) == 0) {
+    if (stopping_.value.load(std::memory_order_acquire) &&
+        active_enqueues_.value.load(std::memory_order_acquire) == 0) {
       break;
     }
 
-    const size_t observed = wake_sequence_.load(std::memory_order_acquire);
+    const size_t observed =
+        wake_sequence_.value.load(std::memory_order_acquire);
 
     if (auto* op = TryDequeue(); op != nullptr) {
       op->Complete();
       continue;
     }
 
-    if (stopping_.load(std::memory_order_acquire) &&
-        active_enqueues_.load(std::memory_order_acquire) == 0) {
+    if (stopping_.value.load(std::memory_order_acquire) &&
+        active_enqueues_.value.load(std::memory_order_acquire) == 0) {
       break;
     }
 
-    wake_sequence_.wait(observed, std::memory_order_acquire);
+    wake_sequence_.value.wait(observed, std::memory_order_acquire);
   }
 
   // Drain remaining queued operations — complete them with set_stopped.
@@ -214,7 +230,7 @@ inline void CmdContext::Run() {
 }
 
 inline void CmdContext::Stop() {
-  stopping_.store(true, std::memory_order_release);
+  stopping_.value.store(true, std::memory_order_release);
   WakeConsumer();
 }
 
@@ -224,52 +240,63 @@ inline bool CmdContext::IsOnThread() const noexcept {
 
 inline bool CmdContext::Enqueue(CmdOpBase* op) noexcept {
   // If stopping, reject so the caller can deliver set_stopped().
-  if (stopping_.load(std::memory_order_acquire)) return false;
+  if (stopping_.value.load(std::memory_order_acquire)) return false;
 
-  active_enqueues_.fetch_add(1, std::memory_order_acq_rel);
+  active_enqueues_.value.fetch_add(1, std::memory_order_acq_rel);
 
-  if (stopping_.load(std::memory_order_acquire)) {
+  if (stopping_.value.load(std::memory_order_acquire)) {
     FinishEnqueue();
     return false;
   }
 
-  const size_t tail = tail_.load(std::memory_order_relaxed);
-  const size_t head = head_.load(std::memory_order_acquire);
+  const size_t tail = tail_.value.load(std::memory_order_relaxed);
+  const size_t head = head_.value.load(std::memory_order_acquire);
   if (tail - head >= queue_.size()) {
     FinishEnqueue();
     return false;
   }
 
-  queue_[tail % queue_.size()] = op;
-  tail_.store(tail + 1, std::memory_order_release);
+  queue_[tail & queue_mask_] = op;
+  tail_.value.store(tail + 1, std::memory_order_release);
   FinishEnqueue();
   WakeConsumer();
   return true;
 }
 
 inline CmdOpBase* CmdContext::TryDequeue() noexcept {
-  const size_t head = head_.load(std::memory_order_relaxed);
-  const size_t tail = tail_.load(std::memory_order_acquire);
+  const size_t head = head_.value.load(std::memory_order_relaxed);
+  const size_t tail = tail_.value.load(std::memory_order_acquire);
   if (head == tail) return nullptr;
 
-  const size_t slot = head % queue_.size();
+  const size_t slot = head & queue_mask_;
   auto* op = queue_[slot];
   queue_[slot] = nullptr;
-  head_.store(head + 1, std::memory_order_release);
+  head_.value.store(head + 1, std::memory_order_release);
   return op;
 }
 
 inline void CmdContext::WakeConsumer() noexcept {
-  wake_sequence_.fetch_add(1, std::memory_order_release);
-  wake_sequence_.notify_one();
+  wake_sequence_.value.fetch_add(1, std::memory_order_release);
+  wake_sequence_.value.notify_one();
 }
 
 inline void CmdContext::FinishEnqueue() noexcept {
   const size_t previous =
-      active_enqueues_.fetch_sub(1, std::memory_order_acq_rel);
-  if (previous == 1 && stopping_.load(std::memory_order_acquire)) {
+      active_enqueues_.value.fetch_sub(1, std::memory_order_acq_rel);
+  if (previous == 1 && stopping_.value.load(std::memory_order_acquire)) {
     WakeConsumer();
   }
+}
+
+inline size_t CmdContext::NormalizeQueueCapacity(
+    size_t queue_capacity) noexcept {
+  if (queue_capacity <= 1) return 1;
+  if (std::has_single_bit(queue_capacity)) return queue_capacity;
+
+  constexpr size_t kMaxPowerOfTwo =
+      size_t{1} << (std::numeric_limits<size_t>::digits - 1);
+  if (queue_capacity > kMaxPowerOfTwo) return kMaxPowerOfTwo;
+  return std::bit_ceil(queue_capacity);
 }
 
 inline bool CmdContext::PostFunction(std::function<void()> fn) {

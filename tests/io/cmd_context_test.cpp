@@ -68,18 +68,21 @@ TEST(CmdContextTest, SmallCapacityRunsQueuedOpsInFifoOrder) {
 
   EXPECT_TRUE(ctx.PostFunction([&] { order.push_back(0); }));
   EXPECT_TRUE(ctx.PostFunction([&] { order.push_back(1); }));
+  EXPECT_TRUE(ctx.PostFunction([&] { order.push_back(2); }));
   EXPECT_TRUE(ctx.PostFunction([&] {
-    order.push_back(2);
+    order.push_back(3);
     ctx.Stop();
   }));
+  EXPECT_FALSE(ctx.PostFunction([&] { order.push_back(4); }));
 
   std::thread cmd_thread([&] { ctx.Run(); });
   cmd_thread.join();
 
-  ASSERT_EQ(order.size(), 3u);
+  ASSERT_EQ(order.size(), 4u);
   EXPECT_EQ(order[0], 0);
   EXPECT_EQ(order[1], 1);
   EXPECT_EQ(order[2], 2);
+  EXPECT_EQ(order[3], 3);
 }
 
 TEST(CmdContextTest, EnqueueReturnsFalseWhenRingIsFull) {
@@ -115,6 +118,40 @@ TEST(CmdContextTest, StopWakesRunAndStopsQueuedOps) {
     // Expected: set_stopped may throw.
   }
   EXPECT_FALSE(ran);
+}
+
+TEST(CmdContextTest, StopConcurrentWithSingleProducerDoesNotLoseWakeup) {
+  for (int iteration = 0; iteration < 100; iteration++) {
+    CmdContext ctx(8);
+    std::atomic<bool> start{false};
+    std::atomic<bool> finished{false};
+    std::atomic<int> completed{0};
+
+    std::thread cmd_thread([&] {
+      ctx.Run();
+      finished.store(true, std::memory_order_release);
+    });
+
+    std::thread producer([&] {
+      while (!start.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+      }
+      for (int i = 0; i < 64; i++) {
+        if (!ctx.PostFunction(
+                [&] { completed.fetch_add(1, std::memory_order_relaxed); })) {
+          break;
+        }
+      }
+    });
+
+    start.store(true, std::memory_order_release);
+    ctx.Stop();
+    producer.join();
+    cmd_thread.join();
+
+    EXPECT_TRUE(finished.load(std::memory_order_acquire));
+    EXPECT_GE(completed.load(std::memory_order_relaxed), 0);
+  }
 }
 
 TEST(CmdContextTest, SchedulerIsCopyable) {
