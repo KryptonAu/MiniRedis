@@ -4,6 +4,7 @@
 
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace miniredis::ds {
 namespace {
@@ -24,7 +25,7 @@ TEST(SkiplistTest, InsertSingle) {
   IntSkiplist sl;
   auto* node = sl.Insert(1.0, 42);
   ASSERT_NE(node, nullptr);
-  EXPECT_EQ(node->key, 42);
+  EXPECT_EQ(node->member, 42);
   EXPECT_EQ(node->score, 1.0);
   EXPECT_EQ(sl.Size(), 1);
   EXPECT_EQ(sl.First(), node);
@@ -42,20 +43,20 @@ TEST(SkiplistTest, InsertMultipleOrdered) {
   // Forward traversal
   auto* node = sl.First();
   ASSERT_NE(node, nullptr);
-  EXPECT_EQ(node->key, 10);
+  EXPECT_EQ(node->member, 10);
   EXPECT_EQ(node->score, 1.0);
 
-  node = node->levels[0].forward;
+  node = node->Next();
   ASSERT_NE(node, nullptr);
-  EXPECT_EQ(node->key, 20);
+  EXPECT_EQ(node->member, 20);
   EXPECT_EQ(node->score, 2.0);
 
-  node = node->levels[0].forward;
+  node = node->Next();
   ASSERT_NE(node, nullptr);
-  EXPECT_EQ(node->key, 30);
+  EXPECT_EQ(node->member, 30);
   EXPECT_EQ(node->score, 3.0);
 
-  EXPECT_EQ(node->levels[0].forward, nullptr);
+  EXPECT_EQ(node->Next(), nullptr);
 }
 
 TEST(SkiplistTest, BackwardTraversal) {
@@ -65,17 +66,17 @@ TEST(SkiplistTest, BackwardTraversal) {
 
   auto* tail = sl.Tail();
   ASSERT_NE(tail, nullptr);
-  EXPECT_EQ(tail->key, 20);
+  EXPECT_EQ(tail->member, 20);
 
   auto* prev = tail->backward;
   ASSERT_NE(prev, nullptr);
-  EXPECT_EQ(prev->key, 10);
+  EXPECT_EQ(prev->member, 10);
 
   EXPECT_EQ(prev->backward, nullptr);
 }
 
 // ===== Delete =====
-TEST(SkiplistTest, DeleteByScoreAndKey) {
+TEST(SkiplistTest, DeleteByScoreAndMember) {
   IntSkiplist sl;
   sl.Insert(1.0, 10);
   sl.Insert(2.0, 20);
@@ -86,9 +87,9 @@ TEST(SkiplistTest, DeleteByScoreAndKey) {
 
   // Verify 20 is gone
   auto* node = sl.First();
-  EXPECT_EQ(node->key, 10);
-  node = node->levels[0].forward;
-  EXPECT_EQ(node->key, 30);
+  EXPECT_EQ(node->member, 10);
+  node = node->Next();
+  EXPECT_EQ(node->member, 30);
 }
 
 TEST(SkiplistTest, DeleteByNodePointer) {
@@ -98,7 +99,52 @@ TEST(SkiplistTest, DeleteByNodePointer) {
 
   EXPECT_TRUE(sl.DeleteNode(n));
   EXPECT_EQ(sl.Size(), 1);
-  EXPECT_EQ(sl.First()->key, 20);
+  EXPECT_EQ(sl.First()->member, 20);
+}
+
+TEST(SkiplistTest, DeleteByScoreAndMemberMaintainsRanksInLargeList) {
+  IntSkiplist sl;
+  for (int i = 1; i <= 2048; i++) {
+    sl.Insert(static_cast<double>(i), i);
+  }
+
+  EXPECT_TRUE(sl.Delete(1024.0, 1024));
+  EXPECT_EQ(sl.Size(), 2047);
+  EXPECT_FALSE(sl.GetRank(1024.0, 1024).has_value());
+
+  auto rank = sl.GetRank(1025.0, 1025);
+  ASSERT_TRUE(rank.has_value());
+  EXPECT_EQ(*rank, 1024);
+
+  auto* node = sl.GetByRank(1024);
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node->member, 1025);
+  ASSERT_NE(sl.Tail(), nullptr);
+  EXPECT_EQ(sl.Tail()->member, 2048);
+}
+
+TEST(SkiplistTest, DeleteByNodePointerKeepsLevelZeroOwnershipChain) {
+  IntSkiplist sl;
+  sl.Insert(1.0, 10);
+  sl.Insert(2.0, 20);
+  auto* middle = sl.Insert(3.0, 30);
+  sl.Insert(4.0, 40);
+  sl.Insert(5.0, 50);
+
+  EXPECT_TRUE(sl.DeleteNode(middle));
+  EXPECT_EQ(sl.Size(), 4);
+
+  std::vector<int> members;
+  for (auto* node = sl.First(); node; node = node->Next()) {
+    members.push_back(node->member);
+  }
+  EXPECT_EQ(members, (std::vector<int>{10, 20, 40, 50}));
+  ASSERT_NE(sl.Tail(), nullptr);
+  EXPECT_EQ(sl.Tail()->member, 50);
+
+  auto rank = sl.GetRank(4.0, 40);
+  ASSERT_TRUE(rank.has_value());
+  EXPECT_EQ(*rank, 3);
 }
 
 // ===== Rank =====
@@ -125,22 +171,22 @@ TEST(SkiplistTest, GetByRank) {
 
   auto* node = sl.GetByRank(1);
   ASSERT_NE(node, nullptr);
-  EXPECT_EQ(node->key, 10);
+  EXPECT_EQ(node->member, 10);
 
   node = sl.GetByRank(2);
   ASSERT_NE(node, nullptr);
-  EXPECT_EQ(node->key, 20);
+  EXPECT_EQ(node->member, 20);
 
   node = sl.GetByRank(3);
   ASSERT_NE(node, nullptr);
-  EXPECT_EQ(node->key, 30);
+  EXPECT_EQ(node->member, 30);
 
   EXPECT_EQ(sl.GetByRank(0), nullptr);
   EXPECT_EQ(sl.GetByRank(4), nullptr);
 }
 
 // ===== Same score ordering =====
-TEST(SkiplistTest, SameScoreOrdersByKey) {
+TEST(SkiplistTest, SameScoreOrdersByMember) {
   IntSkiplist sl;
   sl.Insert(1.0, 30);
   sl.Insert(1.0, 10);
@@ -149,11 +195,11 @@ TEST(SkiplistTest, SameScoreOrdersByKey) {
   EXPECT_EQ(sl.Size(), 3);
 
   auto* node = sl.First();
-  EXPECT_EQ(node->key, 10);
-  node = node->levels[0].forward;
-  EXPECT_EQ(node->key, 20);
-  node = node->levels[0].forward;
-  EXPECT_EQ(node->key, 30);
+  EXPECT_EQ(node->member, 10);
+  node = node->Next();
+  EXPECT_EQ(node->member, 20);
+  node = node->Next();
+  EXPECT_EQ(node->member, 30);
 }
 
 TEST(SkiplistTest, StringViewOperationsUseSubviewContents) {
@@ -163,9 +209,9 @@ TEST(SkiplistTest, StringViewOperationsUseSubviewContents) {
 
   auto* alpha_node = sl.InsertView(1.0, alpha);
   ASSERT_NE(alpha_node, nullptr);
-  EXPECT_EQ(alpha_node->key, "alpha");
+  EXPECT_EQ(alpha_node->member, "alpha");
   source[2] = 'X';
-  EXPECT_EQ(alpha_node->key, "alpha");
+  EXPECT_EQ(alpha_node->member, "alpha");
 
   sl.InsertView(1.0, "gamma");
   std::string beta_source = "__beta__";
@@ -180,13 +226,13 @@ TEST(SkiplistTest, StringViewOperationsUseSubviewContents) {
 
   auto* node = sl.First();
   ASSERT_NE(node, nullptr);
-  EXPECT_EQ(node->key, "alpha");
-  node = node->levels[0].forward;
+  EXPECT_EQ(node->member, "alpha");
+  node = node->Next();
   ASSERT_NE(node, nullptr);
-  EXPECT_EQ(node->key, "beta");
-  node = node->levels[0].forward;
+  EXPECT_EQ(node->member, "beta");
+  node = node->Next();
   ASSERT_NE(node, nullptr);
-  EXPECT_EQ(node->key, "gamma");
+  EXPECT_EQ(node->member, "gamma");
 
   std::string delete_source = "qqbetaqq";
   std::string_view beta_lookup(delete_source.data() + 2, 4);
@@ -194,9 +240,9 @@ TEST(SkiplistTest, StringViewOperationsUseSubviewContents) {
   EXPECT_EQ(sl.Size(), 2);
   EXPECT_FALSE(sl.GetRankView(1.0, beta_lookup).has_value());
   ASSERT_NE(sl.First(), nullptr);
-  EXPECT_EQ(sl.First()->key, "alpha");
-  ASSERT_NE(sl.First()->levels[0].forward, nullptr);
-  EXPECT_EQ(sl.First()->levels[0].forward->key, "gamma");
+  EXPECT_EQ(sl.First()->member, "alpha");
+  ASSERT_NE(sl.First()->Next(), nullptr);
+  EXPECT_EQ(sl.First()->Next()->member, "gamma");
 }
 
 // ===== Range queries =====
@@ -244,10 +290,10 @@ TEST(SkiplistTest, DeleteRangeByScore) {
   size_t deleted = sl.DeleteRangeByScore(range, [](int, double) {});
   EXPECT_EQ(deleted, 2);
   EXPECT_EQ(sl.Size(), 2);
-  EXPECT_EQ(sl.First()->key, 10);
+  EXPECT_EQ(sl.First()->member, 10);
 
-  auto* n = sl.First()->levels[0].forward;
-  EXPECT_EQ(n->key, 40);
+  auto* n = sl.First()->Next();
+  EXPECT_EQ(n->member, 40);
 }
 
 TEST(SkiplistTest, DeleteRangeByRank) {
@@ -260,8 +306,33 @@ TEST(SkiplistTest, DeleteRangeByRank) {
   size_t deleted = sl.DeleteRangeByRank(2, 3, [](int, double) {});
   EXPECT_EQ(deleted, 2);
   EXPECT_EQ(sl.Size(), 2);
-  EXPECT_EQ(sl.First()->key, 10);
-  EXPECT_EQ(sl.First()->levels[0].forward->key, 40);
+  EXPECT_EQ(sl.First()->member, 10);
+  EXPECT_EQ(sl.First()->Next()->member, 40);
+}
+
+TEST(SkiplistTest, DeleteRangeByRankPreservesCallbacksTailAndRanks) {
+  IntSkiplist sl;
+  for (int i = 1; i <= 6; i++) {
+    sl.Insert(static_cast<double>(i), i * 10);
+  }
+
+  std::vector<int> deleted_members;
+  size_t deleted = sl.DeleteRangeByRank(
+      2, 5, [&](int member, double) { deleted_members.push_back(member); });
+
+  EXPECT_EQ(deleted, 4);
+  EXPECT_EQ(deleted_members, (std::vector<int>{20, 30, 40, 50}));
+  EXPECT_EQ(sl.Size(), 2);
+  ASSERT_NE(sl.First(), nullptr);
+  EXPECT_EQ(sl.First()->member, 10);
+  ASSERT_NE(sl.Tail(), nullptr);
+  EXPECT_EQ(sl.Tail()->member, 60);
+  EXPECT_EQ(sl.First()->Next(), sl.Tail());
+  EXPECT_EQ(sl.Tail()->Next(), nullptr);
+
+  auto rank = sl.GetRank(6.0, 60);
+  ASSERT_TRUE(rank.has_value());
+  EXPECT_EQ(*rank, 2);
 }
 
 // ===== Random level =====
@@ -283,11 +354,11 @@ TEST(SkiplistTest, LargeNumberOfEntries) {
 
   auto* node = sl.GetByRank(1);
   ASSERT_NE(node, nullptr);
-  EXPECT_EQ(node->key, 0);
+  EXPECT_EQ(node->member, 0);
 
   node = sl.GetByRank(10000);
   ASSERT_NE(node, nullptr);
-  EXPECT_EQ(node->key, 9999);
+  EXPECT_EQ(node->member, 9999);
 }
 
 }  // namespace

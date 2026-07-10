@@ -126,15 +126,31 @@ TEST(ZSetValueTest, UpgradeToSkiplist) {
 }
 
 TEST(ZSetValueTest, SkiplistDictConsistencyAfterMove) {
-  ZSetValue zs;
-  zs.Add("a", 1.0);
+  EncodingThresholds t;
+  t.zset_max_listpack_entries = 1;
+  ZSetValue zs(t);
+  zs.Add("seed", 0.0);
   zs.Add("b", 2.0);
+  ASSERT_EQ(zs.Encoding(), ValueEncoding::kSkiplist);
+
+  zs.Add("a", 1.0);
+  zs.Add("b", 3.0);
+  EXPECT_TRUE(zs.Remove("seed"));
+  EXPECT_EQ(zs.Count(), 2);
+  EXPECT_FALSE(zs.Score("seed").has_value());
+  EXPECT_DOUBLE_EQ(zs.Score("b").value(), 3.0);
+  EXPECT_EQ(zs.Rank("a").value(), 0);
+  EXPECT_EQ(zs.Rank("b").value(), 1);
+
   ZSetValue zs2(std::move(zs));
   EXPECT_EQ(zs2.Count(), 2);
   EXPECT_DOUBLE_EQ(zs2.Score("a").value(), 1.0);
   EXPECT_EQ(zs2.Rank("b").value(), 1);
+
   EXPECT_TRUE(zs2.Remove("a"));
   EXPECT_EQ(zs2.Count(), 1);
+  EXPECT_FALSE(zs2.Score("a").has_value());
+  EXPECT_DOUBLE_EQ(zs2.Score("b").value(), 3.0);
 }
 
 // Regression: RevRange(0,0) must return MAX, not min

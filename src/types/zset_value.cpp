@@ -258,7 +258,7 @@ size_t ZSetValue::CountByScore(double min, double max, bool min_ex,
     double s = node->score;
     if (max_ex ? s >= max : s > max) break;
     count++;
-    node = node->levels[0].forward;
+    node = node->Next();
   }
   return count;
 }
@@ -317,8 +317,8 @@ std::vector<ZSetValue::RangeResult> ZSetValue::Range(long long start,
   auto& zs = std::get<ZSetSkiplist>(encoding_);
   auto* node = zs.skiplist.GetByRank(static_cast<size_t>(start + 1));
   for (long long i = start; i <= stop && node; i++) {
-    result.push_back({node->key, node->score});
-    node = node->levels[0].forward;
+    result.push_back({node->member, node->score});
+    node = node->Next();
   }
   return result;
 }
@@ -375,7 +375,7 @@ std::vector<ZSetValue::RangeResult> ZSetValue::RangeByScore(
   if (!zs.skiplist.ScoreInRange(spec)) return result;
   auto* node = zs.skiplist.FirstInRange(spec);
   while (offset > 0 && node) {
-    node = node->levels[0].forward;
+    node = node->Next();
     offset--;
     // Check if still in range
     if (node && (max_ex ? node->score >= max : node->score > max))
@@ -383,9 +383,9 @@ std::vector<ZSetValue::RangeResult> ZSetValue::RangeByScore(
   }
   while (node) {
     if (max_ex ? node->score >= max : node->score > max) break;
-    result.push_back({node->key, node->score});
+    result.push_back({node->member, node->score});
     if (count >= 0 && static_cast<long long>(result.size()) >= count) break;
-    node = node->levels[0].forward;
+    node = node->Next();
   }
   return result;
 }
@@ -542,12 +542,12 @@ size_t ZSetValue::RemoveRangeByLex(std::string_view min, std::string_view max,
   size_t removed = 0;
   auto* node = zs.skiplist.First();
   while (node) {
-    auto* next = node->levels[0].forward;
+    auto* next = node->Next();
     bool in_range = true;
-    if (min_ex ? node->key <= min : node->key < min) in_range = false;
-    if (max_ex ? node->key >= max : node->key > max) in_range = false;
+    if (min_ex ? node->member <= min : node->member < min) in_range = false;
+    if (max_ex ? node->member >= max : node->member > max) in_range = false;
     if (in_range) {
-      zs.dict.DeleteView(node->key);
+      zs.dict.DeleteView(node->member);
       zs.skiplist.DeleteNode(node);
       removed++;
     }

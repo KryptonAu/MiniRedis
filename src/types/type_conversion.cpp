@@ -89,8 +89,8 @@ void ZSetSkiplist::RebuildDict() {
   dict.Clear();
   auto* node = skiplist.First();
   while (node) {
-    dict.SetView(node->key, node);
-    node = node->levels[0].forward;
+    dict.SetView(node->member, node);
+    node = node->Next();
   }
 }
 
