@@ -1,5 +1,6 @@
 #include "core/resp_protocol.h"
 
+#include <cassert>
 #include <cctype>
 #include <charconv>
 #include <cstdlib>
@@ -42,12 +43,44 @@ void AppendInt64(std::string& out, int64_t value) {
 
 }  // namespace
 
+// ===== CommandArgStorage =====
+
+void CommandArgStorage::Begin(size_t expected_count) {
+  inline_size_ = 0;
+  using_heap_ = expected_count > kInlineCapacity;
+  if (using_heap_) {
+    heap_args_.clear();
+    heap_args_.reserve(expected_count);
+  }
+}
+
+void CommandArgStorage::Append(std::string_view arg) {
+  if (using_heap_) {
+    heap_args_.push_back(arg);
+    return;
+  }
+
+  assert(inline_size_ < kInlineCapacity);
+  inline_args_[inline_size_++] = arg;
+}
+
+std::span<const std::string_view> CommandArgStorage::Args() const {
+  if (using_heap_) return heap_args_;
+  return std::span<const std::string_view>(inline_args_.data(), inline_size_);
+}
+
+void CommandArgStorage::ReleaseOversizedHeap() {
+  if (heap_args_.capacity() > kMaxRetainedHeapArgs) {
+    std::vector<std::string_view>().swap(heap_args_);
+  }
+}
+
 // ===== RespCommand =====
 
 RespCommand::RespCommand() = default;
 
-RespCommand::RespCommand(std::vector<std::string_view> args)
-    : args_(std::move(args)) {}
+RespCommand::RespCommand(std::span<const std::string_view> args)
+    : args_(args) {}
 
 std::span<const std::string_view> RespCommand::Args() const { return args_; }
 
@@ -72,8 +105,10 @@ std::vector<std::string> RespCommand::ToOwnedVector() const {
 
 RespParser::RespParser() = default;
 
-RespParseResult RespParser::ParseNext(std::string_view readable) {
+RespParseResult RespParser::ParseNext(std::string_view readable,
+                                      CommandArgStorage& args) {
   RespParseResult result;
+  args.Begin(0);
   if (!error_.empty()) {
     result.status = ParseStatus::kError;
     return result;
@@ -81,11 +116,14 @@ RespParseResult RespParser::ParseNext(std::string_view readable) {
   if (readable.empty()) return result;
 
   size_t pos = 0;
-  ParsedCommand parsed;
-  result.status = ParseOneAt(readable, pos, parsed);
+  result.status = ParseOneAt(readable, pos, args);
   if (result.status == ParseStatus::kComplete) {
     result.consumed = pos;
-    result.command = RespCommand(std::move(parsed.args));
+    result.command = RespCommand(args.Args());
+  } else {
+    // No RespCommand was produced, so oversized descriptor storage need not
+    // remain attached to a partial or invalid request.
+    args.ReleaseOversizedHeap();
   }
 
   return result;
@@ -99,7 +137,7 @@ std::optional<std::string_view> RespParser::LastError() const {
 }
 
 ParseStatus RespParser::ParseOneAt(std::string_view readable, size_t& pos,
-                                   ParsedCommand& command) {
+                                   CommandArgStorage& args) {
   size_t start = pos;
   if (pos >= readable.size()) {
     pos = start;
@@ -155,7 +193,7 @@ ParseStatus RespParser::ParseOneAt(std::string_view readable, size_t& pos,
   }
 
   // Parse array elements
-  command.args.reserve(static_cast<size_t>(array_len));
+  args.Begin(static_cast<size_t>(array_len));
   for (int64_t i = 0; i < array_len; i++) {
     if (pos >= readable.size()) {
       pos = start;
@@ -212,8 +250,8 @@ ParseStatus RespParser::ParseOneAt(std::string_view readable, size_t& pos,
       pos = start;
       return ParseStatus::kIncomplete;
     }
-    command.args.emplace_back(readable.data() + pos,
-                              static_cast<size_t>(bulk_len));
+    args.Append(
+        std::string_view(readable.data() + pos, static_cast<size_t>(bulk_len)));
     pos += static_cast<size_t>(bulk_len);
     if (readable[pos] != '\r' || readable[pos + 1] != '\n') {
       error_ = "Missing CRLF after bulk data";

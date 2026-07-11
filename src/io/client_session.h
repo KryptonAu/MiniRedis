@@ -55,6 +55,7 @@ inline exec::task<void> handle_client(
   try {
     auto& parser = client->Parser();
     auto& query_buf = client->QueryBuffer();
+    auto& arg_storage = client->ArgStorage();
     auto& reply_buf = client->ReplyBuffer();
 
     while (true) {
@@ -65,34 +66,40 @@ inline exec::task<void> handle_client(
       query_buf.CommitWrite(read.bytes_read);
 
       while (true) {
-        RespParseResult parsed = parser.ParseNext(query_buf.Readable());
-        if (parsed.status == ParseStatus::kIncomplete) break;
-        if (parsed.status == ParseStatus::kError) {
-          std::string err_reply = RespReply::Error("ERR protocol error");
-          AsyncWriteSender writer{io_sched.GetContext(), client_fd,
-                                  std::move(err_reply)};
-          (void)co_await std::move(writer);
-          co_return;
-        }
+        size_t consumed = 0;
+        std::string reply;
+        {
+          RespParseResult parsed =
+              parser.ParseNext(query_buf.Readable(), arg_storage);
+          if (parsed.status == ParseStatus::kIncomplete) break;
+          if (parsed.status == ParseStatus::kError) {
+            std::string err_reply = RespReply::Error("ERR protocol error");
+            AsyncWriteSender writer{io_sched.GetContext(), client_fd,
+                                    std::move(err_reply)};
+            (void)co_await std::move(writer);
+            co_return;
+          }
 
-        size_t consumed = parsed.consumed;
-        RespCommand command = std::move(parsed.command);
-        std::string reply = co_await stdexec::starts_on(
-            cmd_sched, stdexec::just(std::move(command)) |
-                           stdexec::then([&](RespCommand cmd_args) {
-                             Database* db = server.GetDbFor(*client);
-                             if (db == nullptr) {
-                               return RespReply::Error("ERR invalid DB index");
-                             }
-                             CommandContext ctx{server, *client, *db};
-                             ctx.propagate = propagate;
-                             ctx.apply_config = apply_config;
-                             return ExecuteCommand(registry, ctx,
-                                                   cmd_args.Args());
-                           }));
+          consumed = parsed.consumed;
+          RespCommand command = std::move(parsed.command);
+          reply = co_await stdexec::starts_on(
+              cmd_sched,
+              stdexec::just(std::move(command)) |
+                  stdexec::then([&](RespCommand cmd_args) {
+                    Database* db = server.GetDbFor(*client);
+                    if (db == nullptr) {
+                      return RespReply::Error("ERR invalid DB index");
+                    }
+                    CommandContext ctx{server, *client, *db};
+                    ctx.propagate = propagate;
+                    ctx.apply_config = apply_config;
+                    return ExecuteCommand(registry, ctx, cmd_args.Args());
+                  }));
+        }
         // Transfer back to the IO thread before touching parser/reply_buf.
         co_await io_sched.schedule();
         query_buf.Consume(consumed);
+        arg_storage.ReleaseOversizedHeap();
         reply_buf += reply;
       }
 

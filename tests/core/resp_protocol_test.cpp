@@ -18,11 +18,23 @@ static bool ViewInside(std::string_view view, std::string_view storage) {
   return view_base >= base && view_base + view.size() <= end;
 }
 
+static std::string EncodeBulkArray(
+    const std::vector<std::string_view>& elements) {
+  std::string result = "*" + std::to_string(elements.size()) + "\r\n";
+  for (std::string_view element : elements) {
+    result += "$" + std::to_string(element.size()) + "\r\n";
+    result.append(element);
+    result += "\r\n";
+  }
+  return result;
+}
+
 // ===== Parser: basic single command =====
 TEST(RespParserTest, ParseSimpleCommand) {
   RespParser parser;
+  CommandArgStorage args;
   std::string input = "*2\r\n$3\r\nGET\r\n$3\r\nkey\r\n";
-  auto parsed = parser.ParseNext(input);
+  auto parsed = parser.ParseNext(input, args);
   EXPECT_EQ(parsed.status, ParseStatus::kComplete);
   EXPECT_EQ(parsed.consumed, input.size());
   auto& cmd = parsed.command;
@@ -36,8 +48,9 @@ TEST(RespParserTest, ParseSimpleCommand) {
 
 TEST(RespParserTest, ParseSetCommand) {
   RespParser parser;
+  CommandArgStorage args;
   std::string input = "*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$5\r\nvalue\r\n";
-  auto parsed = parser.ParseNext(input);
+  auto parsed = parser.ParseNext(input, args);
   EXPECT_EQ(parsed.status, ParseStatus::kComplete);
   EXPECT_EQ(parsed.consumed, input.size());
   auto& cmd = parsed.command;
@@ -50,10 +63,43 @@ TEST(RespParserTest, ParseSetCommand) {
   EXPECT_TRUE(ViewInside(cmd[2], input));
 }
 
+TEST(RespParserTest, ParsesInlineCapacityArguments) {
+  RespParser parser;
+  CommandArgStorage args;
+  const std::vector<std::string_view> elements = {
+      "CMD", "one", "two", "three", "four", "five", "six", "seven"};
+  std::string input = EncodeBulkArray(elements);
+
+  auto parsed = parser.ParseNext(input, args);
+  ASSERT_EQ(parsed.status, ParseStatus::kComplete);
+  ASSERT_EQ(parsed.command.size(), CommandArgStorage::kInlineCapacity);
+  for (size_t i = 0; i < elements.size(); ++i) {
+    EXPECT_EQ(parsed.command[i], elements[i]);
+    EXPECT_TRUE(ViewInside(parsed.command[i], input));
+  }
+}
+
+TEST(RespParserTest, ParsesArgumentsBeyondInlineCapacity) {
+  RespParser parser;
+  CommandArgStorage args;
+  const std::vector<std::string_view> elements = {
+      "CMD", "one", "two", "three", "four", "five", "six", "seven", "eight"};
+  std::string input = EncodeBulkArray(elements);
+
+  auto parsed = parser.ParseNext(input, args);
+  ASSERT_EQ(parsed.status, ParseStatus::kComplete);
+  ASSERT_EQ(parsed.command.size(), CommandArgStorage::kInlineCapacity + 1);
+  for (size_t i = 0; i < elements.size(); ++i) {
+    EXPECT_EQ(parsed.command[i], elements[i]);
+    EXPECT_TRUE(ViewInside(parsed.command[i], input));
+  }
+}
+
 TEST(RespParserTest, EmptyBulkStringArgument) {
   RespParser parser;
+  CommandArgStorage args;
   std::string input = "*2\r\n$3\r\nSET\r\n$0\r\n\r\n";
-  auto parsed = parser.ParseNext(input);
+  auto parsed = parser.ParseNext(input, args);
   EXPECT_EQ(parsed.status, ParseStatus::kComplete);
   auto& cmd = parsed.command;
   ASSERT_EQ(cmd.size(), 2);
@@ -64,13 +110,14 @@ TEST(RespParserTest, EmptyBulkStringArgument) {
 // ===== Parser: partial reads =====
 TEST(RespParserTest, PartialInputIncomplete) {
   RespParser parser;
+  CommandArgStorage args;
   std::string partial = "*2\r\n$3\r\n";
-  auto parsed = parser.ParseNext(partial);
+  auto parsed = parser.ParseNext(partial, args);
   EXPECT_EQ(parsed.status, ParseStatus::kIncomplete);
   EXPECT_EQ(parsed.consumed, 0u);
 
   std::string complete = partial + "GET\r\n$3\r\nkey\r\n";
-  parsed = parser.ParseNext(complete);
+  parsed = parser.ParseNext(complete, args);
   EXPECT_EQ(parsed.status, ParseStatus::kComplete);
   EXPECT_EQ(parsed.consumed, complete.size());
   ASSERT_EQ(parsed.command.size(), 2);
@@ -81,36 +128,39 @@ TEST(RespParserTest, PartialInputIncomplete) {
 // ===== Parser: pipelining =====
 TEST(RespParserTest, PipeliningTwoCommands) {
   RespParser parser;
+  CommandArgStorage args;
   std::string input = "*1\r\n$4\r\nPING\r\n*1\r\n$4\r\nPING\r\n";
 
-  auto first = parser.ParseNext(input);
+  auto first = parser.ParseNext(input, args);
   ASSERT_EQ(first.status, ParseStatus::kComplete);
   ASSERT_EQ(first.command.size(), 1);
   EXPECT_EQ(first.command[0], "PING");
 
   auto second =
-      parser.ParseNext(std::string_view(input).substr(first.consumed));
+      parser.ParseNext(std::string_view(input).substr(first.consumed), args);
   ASSERT_EQ(second.status, ParseStatus::kComplete);
   ASSERT_EQ(second.command.size(), 1);
   EXPECT_EQ(second.command[0], "PING");
   EXPECT_EQ(first.consumed + second.consumed, input.size());
 }
 
-TEST(RespParserTest, TakenCommandSurvivesWhileOriginalStorageLives) {
+TEST(RespParserTest, CommandIsValidBeforeStorageIsReused) {
   RespParser parser;
+  CommandArgStorage args;
   std::string first_input = "*1\r\n$4\r\nPING\r\n";
-  auto first_parse = parser.ParseNext(first_input);
+  auto first_parse = parser.ParseNext(first_input, args);
   ASSERT_EQ(first_parse.status, ParseStatus::kComplete);
   RespCommand first = std::move(first_parse.command);
-
-  std::string second_input = "*2\r\n$4\r\nECHO\r\n$3\r\nhey\r\n";
-  auto second_parse = parser.ParseNext(second_input);
-  ASSERT_EQ(second_parse.status, ParseStatus::kComplete);
-  RespCommand second = std::move(second_parse.command);
 
   EXPECT_EQ(first.size(), 1);
   EXPECT_EQ(first[0], "PING");
   EXPECT_EQ(first.ToOwnedVector(), std::vector<std::string>({"PING"}));
+
+  std::string second_input = "*2\r\n$4\r\nECHO\r\n$3\r\nhey\r\n";
+  auto second_parse = parser.ParseNext(second_input, args);
+  ASSERT_EQ(second_parse.status, ParseStatus::kComplete);
+  RespCommand second = std::move(second_parse.command);
+
   ASSERT_EQ(second.size(), 2);
   EXPECT_EQ(second[0], "ECHO");
   EXPECT_EQ(second[1], "hey");
@@ -118,6 +168,7 @@ TEST(RespParserTest, TakenCommandSurvivesWhileOriginalStorageLives) {
 
 TEST(RespParserTest, LargePipelineKeepsOrderAndClearsBuffer) {
   RespParser parser;
+  CommandArgStorage args;
   std::string input;
   constexpr int kCommandCount = 10000;
   std::string frame = "*1\r\n$4\r\nPING\r\n";
@@ -128,7 +179,8 @@ TEST(RespParserTest, LargePipelineKeepsOrderAndClearsBuffer) {
 
   size_t offset = 0;
   for (int i = 0; i < kCommandCount; i++) {
-    auto parsed = parser.ParseNext(std::string_view(input).substr(offset));
+    auto parsed =
+        parser.ParseNext(std::string_view(input).substr(offset), args);
     ASSERT_EQ(parsed.status, ParseStatus::kComplete);
     RespCommand cmd = std::move(parsed.command);
     ASSERT_EQ(cmd.size(), 1);
@@ -140,16 +192,17 @@ TEST(RespParserTest, LargePipelineKeepsOrderAndClearsBuffer) {
 
 TEST(RespParserTest, LargeBulkStringCanArriveInPieces) {
   RespParser parser;
+  CommandArgStorage args;
   std::string value(64 * 1024, 'x');
   std::string prefix =
       "*2\r\n$3\r\nSET\r\n$" + std::to_string(value.size()) + "\r\n";
 
-  auto partial = parser.ParseNext(prefix);
+  auto partial = parser.ParseNext(prefix, args);
   EXPECT_EQ(partial.status, ParseStatus::kIncomplete);
   EXPECT_EQ(partial.consumed, 0u);
 
   std::string complete = prefix + value + "\r\n";
-  auto parsed = parser.ParseNext(complete);
+  auto parsed = parser.ParseNext(complete, args);
   EXPECT_EQ(parsed.status, ParseStatus::kComplete);
   EXPECT_EQ(parsed.consumed, complete.size());
   RespCommand cmd = std::move(parsed.command);
@@ -162,30 +215,35 @@ TEST(RespParserTest, LargeBulkStringCanArriveInPieces) {
 // ===== Parser: error cases =====
 TEST(RespParserTest, EmptyArrayError) {
   RespParser parser;
-  auto parsed = parser.ParseNext("*0\r\n");
+  CommandArgStorage args;
+  auto parsed = parser.ParseNext("*0\r\n", args);
   EXPECT_EQ(parsed.status, ParseStatus::kError);
   EXPECT_TRUE(parser.LastError().has_value());
 }
 
 TEST(RespParserTest, NullBulkInCommandError) {
   RespParser parser;
-  auto parsed = parser.ParseNext("*2\r\n$-1\r\n\r\n$3\r\nfoo\r\n");
+  CommandArgStorage args;
+  auto parsed = parser.ParseNext("*2\r\n$-1\r\n\r\n$3\r\nfoo\r\n", args);
   EXPECT_EQ(parsed.status, ParseStatus::kError);
 }
 
 TEST(RespParserTest, NestedArrayError) {
   RespParser parser;
-  auto parsed = parser.ParseNext("*2\r\n*1\r\n$4\r\nNEST\r\n\r\n$3\r\nfoo\r\n");
+  CommandArgStorage args;
+  auto parsed =
+      parser.ParseNext("*2\r\n*1\r\n$4\r\nNEST\r\n\r\n$3\r\nfoo\r\n", args);
   EXPECT_EQ(parsed.status, ParseStatus::kError);
 }
 
 TEST(RespParserTest, ResetAfterError) {
   RespParser parser;
-  parser.ParseNext("*0\r\n");  // error
-  EXPECT_EQ(parser.ParseNext("*2\r\n").status,
+  CommandArgStorage args;
+  parser.ParseNext("*0\r\n", args);  // error
+  EXPECT_EQ(parser.ParseNext("*2\r\n", args).status,
             ParseStatus::kError);  // still errors
   parser.Reset();
-  auto parsed = parser.ParseNext("*1\r\n$4\r\nPING\r\n");
+  auto parsed = parser.ParseNext("*1\r\n$4\r\nPING\r\n", args);
   EXPECT_EQ(parsed.status, ParseStatus::kComplete);
   ASSERT_EQ(parsed.command.size(), 1);
   EXPECT_EQ(parsed.command[0], "PING");

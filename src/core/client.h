@@ -45,6 +45,8 @@ class Client {
 
   miniredis::QueryBuffer& QueryBuffer();
   const miniredis::QueryBuffer& QueryBuffer() const;
+  CommandArgStorage& ArgStorage();
+  const CommandArgStorage& ArgStorage() const;
   RespParser& Parser();
   const RespParser& Parser() const;
 
@@ -62,6 +64,7 @@ class Client {
   size_t id_;
   int db_index_;
   miniredis::QueryBuffer query_buffer_;
+  CommandArgStorage command_arg_storage_;
   RespParser parser_;
   std::string reply_buffer_;
   bool authenticated_;

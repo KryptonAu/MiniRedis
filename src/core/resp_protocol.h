@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <optional>
 #include <span>
@@ -15,6 +16,27 @@ enum class ParseStatus {
   kError,
 };
 
+// Reusable, client-owned storage for parsed argument descriptors. The bulk
+// string bytes remain in QueryBuffer; this object stores only their views.
+class CommandArgStorage {
+ public:
+  static constexpr size_t kInlineCapacity = 8;
+  static constexpr size_t kMaxRetainedHeapArgs = 64;
+
+  void Begin(size_t expected_count);
+  void Append(std::string_view arg);
+  std::span<const std::string_view> Args() const;
+
+  // Call only after the command using Args() has completed.
+  void ReleaseOversizedHeap();
+
+ private:
+  std::array<std::string_view, kInlineCapacity> inline_args_;
+  std::vector<std::string_view> heap_args_;
+  size_t inline_size_ = 0;
+  bool using_heap_ = false;
+};
+
 class RespCommand {
  public:
   RespCommand();
@@ -28,9 +50,11 @@ class RespCommand {
  private:
   friend class RespParser;
 
-  explicit RespCommand(std::vector<std::string_view> args);
+  explicit RespCommand(std::span<const std::string_view> args);
 
-  std::vector<std::string_view> args_;
+  // The Client-owned CommandArgStorage and QueryBuffer must remain stable
+  // until command execution finishes. Args must not escape that boundary.
+  std::span<const std::string_view> args_;
 };
 
 struct RespParseResult {
@@ -44,22 +68,18 @@ class RespParser {
   RespParser();
 
   // Parses one command in-place from caller-owned storage. A completed
-  // RespCommand contains string_views into `readable`, so the caller must keep
-  // that storage stable until command execution finishes.
-  RespParseResult ParseNext(std::string_view readable);
+  // RespCommand views both `readable` and `args`, which must remain stable
+  // until command execution finishes.
+  RespParseResult ParseNext(std::string_view readable, CommandArgStorage& args);
 
   void Reset();
   std::optional<std::string_view> LastError() const;
 
  private:
-  struct ParsedCommand {
-    std::vector<std::string_view> args;
-  };
-
   std::string error_;
 
   ParseStatus ParseOneAt(std::string_view readable, size_t& pos,
-                         ParsedCommand& command);
+                         CommandArgStorage& args);
 };
 
 class RespReply {

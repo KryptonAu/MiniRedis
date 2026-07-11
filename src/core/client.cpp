@@ -79,6 +79,12 @@ const miniredis::QueryBuffer& Client::QueryBuffer() const {
   return query_buffer_;
 }
 
+CommandArgStorage& Client::ArgStorage() { return command_arg_storage_; }
+
+const CommandArgStorage& Client::ArgStorage() const {
+  return command_arg_storage_;
+}
+
 RespParser& Client::Parser() { return parser_; }
 
 const RespParser& Client::Parser() const { return parser_; }
