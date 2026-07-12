@@ -34,17 +34,6 @@ struct EpollIoOpBase {
 };
 
 // ===========================================================================
-// FdState — per-fd epoll bookkeeping.
-// ===========================================================================
-struct FdState {
-  int fd = -1;
-  EpollIoOpBase* read_op = nullptr;
-  EpollIoOpBase* write_op = nullptr;
-  EpollIoOpBase* accept_op = nullptr;
-  uint32_t armed_events = 0;
-};
-
-// ===========================================================================
 // AsyncReadResult
 // ===========================================================================
 struct AsyncReadResult {

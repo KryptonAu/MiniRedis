@@ -1,10 +1,10 @@
 #pragma once
 
 #include <atomic>
+#include <cstdint>
 #include <functional>
 #include <stdexec/execution.hpp>
 #include <thread>
-#include <unordered_map>
 #include <vector>
 
 namespace miniredis {
@@ -22,7 +22,17 @@ struct EpollOpBase {
 
 // Forward-declared — defined in async_io.h.
 struct EpollIoOpBase;
-struct FdState;
+
+// ===========================================================================
+// FdState — per-fd epoll bookkeeping.
+// ===========================================================================
+struct FdState {
+  int fd = -1;
+  EpollIoOpBase* read_op = nullptr;
+  EpollIoOpBase* write_op = nullptr;
+  EpollIoOpBase* accept_op = nullptr;
+  uint32_t armed_events = 0;
+};
 
 // ===========================================================================
 // Forward declarations
@@ -135,6 +145,8 @@ class EpollContext {
   void ProcessIoEvent(int fd, uint32_t events) noexcept;
   void RecomputeFdMask(EpollIoOpBase* op, bool add);
   void StopAllIoOps() noexcept;
+  FdState& EnsureFdState(int fd);
+  FdState* FindFdState(int fd) noexcept;
 
   int epoll_fd_ = -1;
   int wake_fd_ = -1;
@@ -145,8 +157,8 @@ class EpollContext {
   std::atomic<bool> stopping_{false};
   std::thread::id io_thread_id_{};
 
-  // Per-fd state — accessed only from IO thread.
-  std::unordered_map<int, FdState> fd_state_;
+  // Per-fd state — accessed only from IO thread. An inactive slot has fd -1.
+  std::vector<FdState> fd_state_;
 };
 
 // ===========================================================================

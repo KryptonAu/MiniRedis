@@ -139,6 +139,24 @@ bool EpollContext::Enqueue(EpollOpBase* op) noexcept {
 
 // -- I/O management ----------------------------------------------------------
 
+FdState& EpollContext::EnsureFdState(int fd) {
+  const size_t index = static_cast<size_t>(fd);
+  if (index >= fd_state_.size()) {
+    fd_state_.resize(index + 1);
+  }
+  return fd_state_[index];
+}
+
+FdState* EpollContext::FindFdState(int fd) noexcept {
+  if (fd < 0) return nullptr;
+
+  const size_t index = static_cast<size_t>(fd);
+  if (index >= fd_state_.size()) return nullptr;
+
+  auto& st = fd_state_[index];
+  return st.fd == fd ? &st : nullptr;
+}
+
 void EpollContext::ScheduleArmIo(EpollIoOpBase* op) {
   if (IsStopping()) {
     op->OnStopped();
@@ -174,37 +192,45 @@ void EpollContext::ScheduleArmIo(EpollIoOpBase* op) {
 }
 
 void EpollContext::ArmIo(EpollIoOpBase* op) {
-  auto& st = fd_state_[op->fd];
-  st.fd = op->fd;
+  if (op->fd < 0) {
+    op->OnReady(EPOLLERR);
+    return;
+  }
+
+  auto* st = &EnsureFdState(op->fd);
+  st->fd = op->fd;
 
   uint32_t ev_mask = op->Events();
 
   // Check for duplicate pending op (programmer error).
-  if ((ev_mask & EPOLLIN) && st.read_op != nullptr) {
-    st.read_op->OnReady(EPOLLERR);
-    st.read_op = nullptr;
+  if ((ev_mask & EPOLLIN) && st->read_op != nullptr) {
+    auto* pending_op = st->read_op;
+    st->read_op = nullptr;
+    pending_op->OnReady(EPOLLERR);
+    st = &EnsureFdState(op->fd);
   }
-  if ((ev_mask & EPOLLOUT) && st.write_op != nullptr) {
-    st.write_op->OnReady(EPOLLERR);
-    st.write_op = nullptr;
+  if ((ev_mask & EPOLLOUT) && st->write_op != nullptr) {
+    auto* pending_op = st->write_op;
+    st->write_op = nullptr;
+    pending_op->OnReady(EPOLLERR);
+    st = &EnsureFdState(op->fd);
   }
 
   // Assign the op to the appropriate slot.
   if (ev_mask & EPOLLIN) {
-    if (op->fd == -1) return;  // accept slot is separate
-    st.read_op = op;
+    st->read_op = op;
   }
   if (ev_mask & EPOLLOUT) {
-    st.write_op = op;
+    st->write_op = op;
   }
 
   // Compute the new mask and update epoll.
   uint32_t new_mask = EPOLLERR | EPOLLHUP | EPOLLRDHUP;
-  if (st.read_op != nullptr) new_mask |= EPOLLIN;
-  if (st.write_op != nullptr) new_mask |= EPOLLOUT;
-  if (st.accept_op != nullptr) new_mask |= EPOLLIN;
+  if (st->read_op != nullptr) new_mask |= EPOLLIN;
+  if (st->write_op != nullptr) new_mask |= EPOLLOUT;
+  if (st->accept_op != nullptr) new_mask |= EPOLLIN;
 
-  int op_code = (st.armed_events == 0) ? EPOLL_CTL_ADD : EPOLL_CTL_MOD;
+  int op_code = (st->armed_events == 0) ? EPOLL_CTL_ADD : EPOLL_CTL_MOD;
   epoll_event ev{};
   ev.events = new_mask;
   ev.data.fd = op->fd;
@@ -215,30 +241,36 @@ void EpollContext::ArmIo(EpollIoOpBase* op) {
       ::epoll_ctl(epoll_fd_, EPOLL_CTL_MOD, op->fd, &ev);
     }
   }
-  st.armed_events = new_mask;
+  st->armed_events = new_mask;
 }
 
 void EpollContext::CancelFd(int fd) noexcept {
+  if (fd < 0) return;
   ::epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, fd, nullptr);
 
-  auto it = fd_state_.find(fd);
-  if (it == fd_state_.end()) return;
+  auto* st = FindFdState(fd);
+  if (st == nullptr) return;
 
-  auto& st = it->second;
-  if (st.read_op != nullptr) {
-    st.read_op->OnStopped();
-    st.read_op = nullptr;
+  if (st->read_op != nullptr) {
+    auto* op = st->read_op;
+    st->read_op = nullptr;
+    op->OnStopped();
+    st = FindFdState(fd);
   }
-  if (st.write_op != nullptr) {
-    st.write_op->OnStopped();
-    st.write_op = nullptr;
+  if (st != nullptr && st->write_op != nullptr) {
+    auto* op = st->write_op;
+    st->write_op = nullptr;
+    op->OnStopped();
+    st = FindFdState(fd);
   }
-  if (st.accept_op != nullptr) {
-    st.accept_op->OnStopped();
-    st.accept_op = nullptr;
+  if (st != nullptr && st->accept_op != nullptr) {
+    auto* op = st->accept_op;
+    st->accept_op = nullptr;
+    op->OnStopped();
+    st = FindFdState(fd);
   }
 
-  fd_state_.erase(it);
+  if (st != nullptr) *st = FdState{};
 }
 
 // -- private -----------------------------------------------------------------
@@ -268,26 +300,24 @@ void EpollContext::DrainWakeFd() noexcept {
 }
 
 void EpollContext::ProcessIoEvent(int fd, uint32_t events) noexcept {
-  auto it = fd_state_.find(fd);
-  if (it == fd_state_.end()) return;
-
-  auto& st = it->second;
+  auto* st = FindFdState(fd);
+  if (st == nullptr) return;
 
   // Read/accept readiness
-  if ((events & EPOLLIN) && st.read_op != nullptr) {
-    auto* op = st.read_op;
-    st.read_op = nullptr;
-    st.armed_events &= ~EPOLLIN;
+  if ((events & EPOLLIN) && st->read_op != nullptr) {
+    auto* op = st->read_op;
+    st->read_op = nullptr;
+    st->armed_events &= ~EPOLLIN;
     RecomputeFdMask(op, /*add=*/false);
     op->OnReady(events);
     return;
   }
 
   // Write readiness
-  if ((events & EPOLLOUT) && st.write_op != nullptr) {
-    auto* op = st.write_op;
-    st.write_op = nullptr;
-    st.armed_events &= ~EPOLLOUT;
+  if ((events & EPOLLOUT) && st->write_op != nullptr) {
+    auto* op = st->write_op;
+    st->write_op = nullptr;
+    st->armed_events &= ~EPOLLOUT;
     RecomputeFdMask(op, /*add=*/false);
     op->OnReady(events);
     return;
@@ -295,18 +325,18 @@ void EpollContext::ProcessIoEvent(int fd, uint32_t events) noexcept {
 
   // Error / hangup — deliver to read op if present, else write op.
   if (events & (EPOLLERR | EPOLLHUP | EPOLLRDHUP)) {
-    if (st.read_op != nullptr) {
-      auto* op = st.read_op;
-      st.read_op = nullptr;
-      st.armed_events = 0;
+    if (st->read_op != nullptr) {
+      auto* op = st->read_op;
+      st->read_op = nullptr;
+      st->armed_events = 0;
       RecomputeFdMask(op, /*add=*/false);
       op->OnReady(events);
       return;
     }
-    if (st.write_op != nullptr) {
-      auto* op = st.write_op;
-      st.write_op = nullptr;
-      st.armed_events = 0;
+    if (st->write_op != nullptr) {
+      auto* op = st->write_op;
+      st->write_op = nullptr;
+      st->armed_events = 0;
       RecomputeFdMask(op, /*add=*/false);
       op->OnReady(events);
       return;
@@ -317,29 +347,27 @@ void EpollContext::ProcessIoEvent(int fd, uint32_t events) noexcept {
 void EpollContext::RecomputeFdMask(EpollIoOpBase* op, bool add) {
   // Recompute the epoll mask from FdState and update the kernel.
   int fd = op->fd;
-  auto it = fd_state_.find(fd);
-  if (it == fd_state_.end()) return;
-
-  auto& st = it->second;
+  auto* st = FindFdState(fd);
+  if (st == nullptr) return;
 
   uint32_t new_mask = EPOLLERR | EPOLLHUP | EPOLLRDHUP;
-  if (st.read_op != nullptr) new_mask |= EPOLLIN;
-  if (st.write_op != nullptr) new_mask |= EPOLLOUT;
-  if (st.accept_op != nullptr) new_mask |= EPOLLIN;
+  if (st->read_op != nullptr) new_mask |= EPOLLIN;
+  if (st->write_op != nullptr) new_mask |= EPOLLOUT;
+  if (st->accept_op != nullptr) new_mask |= EPOLLIN;
 
   if (new_mask == (EPOLLERR | EPOLLHUP | EPOLLRDHUP)) {
     // No more ops on this fd — remove from epoll.
-    st.armed_events = 0;
+    st->armed_events = 0;
     ::epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, fd, nullptr);
-    fd_state_.erase(it);
+    *st = FdState{};
   } else {
     // Update the interest mask.
-    int op_code = (st.armed_events != 0) ? EPOLL_CTL_MOD : EPOLL_CTL_ADD;
+    int op_code = (st->armed_events != 0) ? EPOLL_CTL_MOD : EPOLL_CTL_ADD;
     epoll_event ev{};
     ev.events = new_mask;
     ev.data.fd = fd;
     ::epoll_ctl(epoll_fd_, op_code, fd, &ev);
-    st.armed_events = new_mask;
+    st->armed_events = new_mask;
   }
 
   (void)add;  // Reserved for future edge-triggered mode.
@@ -370,8 +398,10 @@ void EpollContext::DisarmTimer() noexcept {
 
 void EpollContext::StopAllIoOps() noexcept {
   DisarmTimer();
-  for (auto& [fd, st] : fd_state_) {
-    ::epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, fd, nullptr);
+  for (auto& st : fd_state_) {
+    if (st.fd < 0) continue;
+
+    ::epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, st.fd, nullptr);
     if (st.read_op != nullptr) {
       st.read_op->OnStopped();
       st.read_op = nullptr;

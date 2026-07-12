@@ -86,6 +86,36 @@ TEST(AsyncIoTest, AsyncReadReceivesData) {
   close(wfd);
 }
 
+TEST(AsyncIoTest, AsyncReadReusesFdStateAfterCompletion) {
+  auto [rfd, wfd] = MakeSocketPair();
+
+  IoLoop io;
+  auto io_sched = io.ctx.get_scheduler();
+
+  auto read_once = [&](std::string_view expected) {
+    ASSERT_EQ(::write(wfd, expected.data(), expected.size()),
+              static_cast<ssize_t>(expected.size()));
+
+    std::array<char, 64> read_buf{};
+    auto sender = stdexec::starts_on(
+        io_sched,
+        AsyncReadSender{&io.ctx, rfd, read_buf} |
+            stdexec::then([&](AsyncReadResult result) {
+              EXPECT_FALSE(result.eof);
+              EXPECT_EQ(result.bytes_read, expected.size());
+              EXPECT_EQ(std::string_view(read_buf.data(), result.bytes_read),
+                        expected);
+            }));
+    stdexec::sync_wait(std::move(sender));
+  };
+
+  read_once("first");
+  read_once("second");
+
+  close(rfd);
+  close(wfd);
+}
+
 TEST(AsyncIoTest, AsyncReadDetectsEof) {
   auto [rfd, wfd] = MakeSocketPair();
 
