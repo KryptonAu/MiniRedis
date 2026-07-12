@@ -65,6 +65,10 @@ static std::string CommandCmd(CommandContext&, CommandArgs args) {
 }
 
 static std::string SaveCmd(CommandContext& ctx, CommandArgs) {
+  if (!ctx.server.GetConfig().save_enabled) {
+    return RespReply::Error("ERR RDB persistence is disabled");
+  }
+
   RdbSerializer serializer;
   auto& cfg = ctx.server.GetConfig();
   if (!serializer.Save(cfg.rdb_filename, ctx.server)) {

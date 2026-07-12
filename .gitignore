@@ -86,3 +86,4 @@ reasonix.toml
 #benchmark
 benchmarks/
 dump.rdb
+redis.config

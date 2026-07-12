@@ -20,6 +20,10 @@ static std::string echo(CommandContext&, CommandArgs args) {
 
 static std::string ok_write(CommandContext&, CommandArgs) { return "+OK\r\n"; }
 
+void EnableAof(Server& server) {
+  ASSERT_TRUE(server.ApplyConfig("appendonly", "yes"));
+}
+
 TEST(DispatcherTest, UnknownCommand) {
   auto reg = CreateDefaultCommandRegistry();
   CommandTestHarness h;
@@ -59,6 +63,7 @@ TEST(DispatcherTest, SuccessfulWriteIncrementsDirtyAndPropagates) {
   reg.Register(
       {"WRITE", 1, static_cast<uint32_t>(CommandFlag::kWrite), ok_write});
   CommandTestHarness h;
+  EnableAof(h.server);
   auto ctx = h.Context();
   std::vector<std::string> propagated;
   int propagated_db = -1;
@@ -81,6 +86,7 @@ TEST(DispatcherTest, SuccessfulWriteIncrementsDirtyAndPropagates) {
 TEST(DispatcherTest, PropagationReceivesSelectedDb) {
   auto reg = CreateDefaultCommandRegistry();
   CommandTestHarness h;
+  EnableAof(h.server);
   ASSERT_TRUE(h.client.SelectDb(2, h.server.DbCount()));
   auto ctx = h.Context();
   int propagated_db = -1;
@@ -102,6 +108,7 @@ TEST(DispatcherTest, PropagationReceivesSelectedDb) {
 TEST(DispatcherTest, IntegerZeroCanStillBeMutatingWrite) {
   auto reg = CreateDefaultCommandRegistry();
   CommandTestHarness h;
+  EnableAof(h.server);
   EXPECT_EQ(h.Call(reg, {"HSET", "hash", "field", "old"}), ":1\r\n");
   h.server.ResetDirty();
 
@@ -131,6 +138,7 @@ TEST(DispatcherTest, NoEvictionRejectsWritesWhenAlreadyOverMaxmemory) {
   EXPECT_EQ(h.Call(reg, {"SET", "existing", large_value}), "+OK\r\n");
   ASSERT_TRUE(h.server.ApplyConfig("maxmemory", "1"));
   ASSERT_TRUE(h.server.ApplyConfig("maxmemory-policy", "noeviction"));
+  EnableAof(h.server);
   h.server.ResetDirty();
 
   auto ctx = h.Context();
@@ -156,6 +164,78 @@ TEST(DispatcherTest, NoEvictionRejectsWritesWhenAlreadyOverMaxmemory) {
   EXPECT_FALSE(h.server.GetDb(0)->Exists("existing"));
   EXPECT_TRUE(propagated);
   EXPECT_EQ(h.server.Stats().dirty, 1u);
+}
+
+TEST(DispatcherTest, PersistenceDisabledSkipsDirtyTrackingAndPropagation) {
+  CommandRegistry reg;
+  reg.Register(
+      {"WRITE", 1, static_cast<uint32_t>(CommandFlag::kWrite), ok_write});
+  CommandTestHarness h;
+  MiniRedisConfig config;
+  config.databases = 4;
+  config.save_enabled = false;
+  config.appendonly = false;
+  ASSERT_TRUE(h.server.Init(config));
+
+  auto ctx = h.Context();
+  bool propagated = false;
+  ctx.propagate = [&](int, const std::vector<std::string>&) {
+    propagated = true;
+    return true;
+  };
+
+  auto result = ExecuteCommandDetailed(reg, ctx, {"WRITE"});
+
+  EXPECT_TRUE(result.ok);
+  EXPECT_TRUE(result.mutated);
+  EXPECT_TRUE(result.propagate_args.empty());
+  EXPECT_FALSE(propagated);
+  EXPECT_EQ(h.server.Stats().dirty, 0u);
+}
+
+TEST(DispatcherTest, RdbOnlyTracksDirtyWithoutAofPropagation) {
+  CommandRegistry reg;
+  reg.Register(
+      {"WRITE", 1, static_cast<uint32_t>(CommandFlag::kWrite), ok_write});
+  CommandTestHarness h;
+
+  auto ctx = h.Context();
+  bool propagated = false;
+  ctx.propagate = [&](int, const std::vector<std::string>&) {
+    propagated = true;
+    return true;
+  };
+
+  auto result = ExecuteCommandDetailed(reg, ctx, {"WRITE"});
+
+  EXPECT_TRUE(result.propagate_args.empty());
+  EXPECT_FALSE(propagated);
+  EXPECT_EQ(h.server.Stats().dirty, 1u);
+}
+
+TEST(DispatcherTest, AofOnlyPropagatesWithoutDirtyTracking) {
+  CommandRegistry reg;
+  reg.Register(
+      {"WRITE", 1, static_cast<uint32_t>(CommandFlag::kWrite), ok_write});
+  CommandTestHarness h;
+  MiniRedisConfig config;
+  config.databases = 4;
+  config.save_enabled = false;
+  config.appendonly = true;
+  ASSERT_TRUE(h.server.Init(config));
+
+  auto ctx = h.Context();
+  bool propagated = false;
+  ctx.propagate = [&](int, const std::vector<std::string>& args) {
+    propagated = args == std::vector<std::string>({"WRITE"});
+    return true;
+  };
+
+  auto result = ExecuteCommandDetailed(reg, ctx, {"WRITE"});
+
+  EXPECT_EQ(result.propagate_args, std::vector<std::string>({"WRITE"}));
+  EXPECT_TRUE(propagated);
+  EXPECT_EQ(h.server.Stats().dirty, 0u);
 }
 
 TEST(DispatcherTest, NoEvictionAllowsPersistWhenAlreadyOverMaxmemory) {

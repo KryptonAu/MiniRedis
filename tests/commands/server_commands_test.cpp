@@ -1,5 +1,8 @@
 #include <gtest/gtest.h>
 
+#include <chrono>
+#include <filesystem>
+
 #include "command_test_util.h"
 #include "commands/registry.h"
 
@@ -100,6 +103,29 @@ TEST(ServerCommandsTest, ConfigSetAppendOnlyUsesRuntimeHook) {
             "+OK\r\n");
   EXPECT_TRUE(hook_called);
   EXPECT_TRUE(h.server.GetConfig().appendonly);
+}
+
+TEST(ServerCommandsTest, SaveIsRejectedWhenRdbPersistenceIsDisabled) {
+  auto reg = CreateDefaultCommandRegistry();
+  CommandTestHarness h;
+  const auto rdb_path =
+      std::filesystem::temp_directory_path() /
+      ("miniredis-disabled-save-" +
+       std::to_string(
+           std::chrono::steady_clock::now().time_since_epoch().count()) +
+       ".rdb");
+  std::filesystem::remove(rdb_path);
+
+  MiniRedisConfig config;
+  config.databases = 4;
+  config.save_enabled = false;
+  config.rdb_filename = rdb_path.string();
+  ASSERT_TRUE(h.server.Init(config));
+
+  const auto reply = h.Call(reg, {"SAVE"});
+
+  EXPECT_EQ(reply, "-ERR RDB persistence is disabled\r\n");
+  EXPECT_FALSE(std::filesystem::exists(rdb_path));
 }
 
 TEST(ServerCommandsTest, InfoIsRegistered) {

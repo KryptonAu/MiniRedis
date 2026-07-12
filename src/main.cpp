@@ -3,6 +3,7 @@
 #include <exec/async_scope.hpp>
 #include <iostream>
 #include <stdexec/execution.hpp>
+#include <string>
 #include <string_view>
 #include <thread>
 #include <vector>
@@ -59,15 +60,69 @@ int64_t NowMs() {
   return std::chrono::duration_cast<std::chrono::milliseconds>(now).count();
 }
 
+struct StartupOptions {
+  bool enable_config_manager = false;
+  std::string config_path = "redis.config";
+};
+
+enum class OptionParseResult { kOk, kHelp, kError };
+
+void PrintUsage(const char* program) {
+  std::cout << "Usage: " << program << " [options]\n"
+            << "  --enable-config-manager  Load the default redis.config file\n"
+            << "  --config <path>           Load configuration from <path>\n"
+            << "  -h, --help                Show this help message\n";
+}
+
+OptionParseResult ParseStartupOptions(int argc, char* argv[],
+                                      StartupOptions& options) {
+  for (int i = 1; i < argc; ++i) {
+    std::string_view arg(argv[i]);
+    if (arg == "-h" || arg == "--help") {
+      PrintUsage(argv[0]);
+      return OptionParseResult::kHelp;
+    }
+    if (arg == "--enable-config-manager") {
+      options.enable_config_manager = true;
+      continue;
+    }
+    if (arg == "--config") {
+      if (++i == argc) {
+        std::cerr << "Missing path after --config" << std::endl;
+        return OptionParseResult::kError;
+      }
+      options.enable_config_manager = true;
+      options.config_path = argv[i];
+      continue;
+    }
+
+    std::cerr << "Unknown option: " << arg << std::endl;
+    return OptionParseResult::kError;
+  }
+  return OptionParseResult::kOk;
+}
+
 }  // namespace
 
 int main(int argc, char* argv[]) {
-  (void)argc;
-  (void)argv;
+  StartupOptions options;
+  const auto parse_result = ParseStartupOptions(argc, argv, options);
+  if (parse_result == OptionParseResult::kHelp) return 0;
+  if (parse_result == OptionParseResult::kError) return 1;
 
   std::cout << "MiniRedis v0.2.0" << std::endl;
 
   MiniRedisConfig config;
+  if (options.enable_config_manager) {
+    ConfigManager config_manager;
+    if (!config_manager.LoadFromFile(options.config_path)) {
+      std::cerr << "Failed to load configuration from " << options.config_path
+                << std::endl;
+      return 1;
+    }
+    config = config_manager.Config();
+  }
+
   Server& server = Server::Instance();
   if (!server.Init(config)) {
     std::cerr << "Failed to initialize server" << std::endl;
@@ -103,7 +158,7 @@ int main(int argc, char* argv[]) {
       }
       aof_selected_db = replay_client.CurrentDb();
     }
-  } else {
+  } else if (config.save_enabled) {
     RdbDeserializer loader;
     if (loader.Load(config.rdb_filename, server)) {
       std::cout << "RDB loaded from " << config.rdb_filename << std::endl;

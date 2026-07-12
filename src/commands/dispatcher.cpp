@@ -113,13 +113,18 @@ CommandResult ExecuteCommandDetailed(CommandRegistry& registry,
     }
   }
 
-  // Build propagate_args (only when not in replay mode and actually mutated).
+  // Persist mutations only for the enabled persistence mechanisms. This keeps
+  // pure in-memory operation free of dirty accounting and AOF argument copies.
   if (!replay_mode && result.ok && result.mutated) {
-    if (result.propagate_args.empty()) {
-      result.propagate_args = ToOwnedArgs(args);
+    const auto& config = context.server.GetConfig();
+    if (config.save_enabled) {
+      context.server.IncrementDirty();
     }
-    context.server.IncrementDirty();
-    if (context.propagate) {
+
+    if (config.appendonly && context.propagate) {
+      if (result.propagate_args.empty()) {
+        result.propagate_args = ToOwnedArgs(args);
+      }
       context.propagate(context.client.CurrentDb(), result.propagate_args);
     }
   }
