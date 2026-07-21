@@ -6,6 +6,7 @@
 #include <unistd.h>
 
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <exec/async_scope.hpp>
 #include <stdexec/execution.hpp>
@@ -86,12 +87,15 @@ static std::string ReadResp(int fd) {
 }
 
 template <typename Run>
-static void WithClientSession(Run&& run) {
+static void WithClientSession(Run&& run, bool appendonly = false,
+                              CommandContext::PropagateFn propagate = {},
+                              CommandContext::ApplyConfigFn apply_config = {}) {
   auto [server_fd, client_fd] = MakeSocketPair();
 
   Server& server = Server::Instance();
   MiniRedisConfig config;
   config.databases = 4;
+  config.appendonly = appendonly;
   server.Init(config);
 
   auto registry = CreateDefaultCommandRegistry();
@@ -108,7 +112,8 @@ static void WithClientSession(Run&& run) {
   std::thread io_thread([&] {
     scope.spawn(stdexec::starts_on(
         io_sched,
-        handle_client(io_sched, cmd_sched, server_fd, server, registry)));
+        handle_client(io_sched, cmd_sched, server_fd, server, registry,
+                      std::move(propagate), std::move(apply_config))));
     io_ctx.Run();
   });
 
@@ -193,6 +198,48 @@ TEST(ClientSessionTest, PipelinedSetGetRoundTrip) {
     ASSERT_TRUE(WaitReadable(client_fd, 5000));
     EXPECT_EQ(ReadResp(client_fd), "$5\r\nvalue\r\n");
   });
+}
+
+TEST(ClientSessionTest, RuntimeCallbacksAreInvokedDuringCommandDispatch) {
+  std::atomic<int> propagated = 0;
+  std::atomic<int> applied_config = 0;
+
+  CommandContext::PropagateFn propagate =
+      [&](int db_index, const std::vector<std::string>& args) {
+        if (db_index == 0 && args.size() == 3 && args[0] == "SET" &&
+            args[1] == "callback-key" && args[2] == "value") {
+          propagated.fetch_add(1, std::memory_order_relaxed);
+        }
+        return true;
+      };
+  CommandContext::ApplyConfigFn apply_config = [&](std::string_view key,
+                                                   std::string_view value) {
+    if (key == "hz" && value == "20") {
+      applied_config.fetch_add(1, std::memory_order_relaxed);
+    }
+    return true;
+  };
+
+  WithClientSession(
+      [](int client_fd) {
+        std::string set_cmd =
+            "*3\r\n$3\r\nSET\r\n$12\r\ncallback-key\r\n$5\r\nvalue\r\n";
+        ASSERT_EQ(::write(client_fd, set_cmd.data(), set_cmd.size()),
+                  static_cast<ssize_t>(set_cmd.size()));
+        ASSERT_TRUE(WaitReadable(client_fd, 5000));
+        EXPECT_EQ(ReadResp(client_fd), "+OK\r\n");
+
+        std::string config_cmd =
+            "*4\r\n$6\r\nCONFIG\r\n$3\r\nSET\r\n$2\r\nhz\r\n$2\r\n20\r\n";
+        ASSERT_EQ(::write(client_fd, config_cmd.data(), config_cmd.size()),
+                  static_cast<ssize_t>(config_cmd.size()));
+        ASSERT_TRUE(WaitReadable(client_fd, 5000));
+        EXPECT_EQ(ReadResp(client_fd), "+OK\r\n");
+      },
+      /*appendonly=*/true, std::move(propagate), std::move(apply_config));
+
+  EXPECT_EQ(propagated.load(std::memory_order_relaxed), 1);
+  EXPECT_EQ(applied_config.load(std::memory_order_relaxed), 1);
 }
 
 }  // namespace

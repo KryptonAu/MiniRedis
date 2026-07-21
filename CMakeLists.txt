@@ -19,6 +19,7 @@ endif()
 # ---- Build options ----
 option(MINIREDIS_BUILD_TESTS "Build unit tests" ON)
 option(MINIREDIS_USE_SANITIZERS "Enable Address/UB sanitizers" OFF)
+option(MINIREDIS_PROFILE_BUILD "Build with frame pointers and debug info for perf profiling" OFF)
 
 # ---- Dependencies: stdexec (FetchContent) ----
 include(FetchContent)
@@ -37,6 +38,13 @@ FetchContent_MakeAvailable(stdexec)
 if(MINIREDIS_USE_SANITIZERS AND CMAKE_BUILD_TYPE STREQUAL "Debug")
     add_compile_options(-fsanitize=address -fsanitize=undefined -fno-omit-frame-pointer)
     add_link_options(-fsanitize=address -fsanitize=undefined)
+endif()
+
+# ---- Profiler-friendly Release builds ----
+if(MINIREDIS_PROFILE_BUILD AND CMAKE_BUILD_TYPE STREQUAL "Release")
+    add_compile_options(-fno-omit-frame-pointer -g)
+    add_link_options(-fno-omit-frame-pointer)
+    message(STATUS "Profiling build: frame pointers ENABLED, debug symbols ENABLED")
 endif()
 
 # ---- Compiler flags ----

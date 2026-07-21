@@ -91,8 +91,14 @@ inline exec::task<void> handle_client(
                       return RespReply::Error("ERR invalid DB index");
                     }
                     CommandContext ctx{server, *client, *db};
-                    ctx.propagate = propagate;
-                    ctx.apply_config = apply_config;
+                    // The callbacks are owned by this coroutine frame and
+                    // only used while executing this awaited command. Keep a
+                    // reference wrapper in CommandContext to avoid cloning
+                    // their type-erased targets for every request.
+                    if (propagate) ctx.propagate = std::cref(propagate);
+                    if (apply_config) {
+                      ctx.apply_config = std::cref(apply_config);
+                    }
                     return ExecuteCommand(registry, ctx, cmd_args.Args());
                   }));
         }
