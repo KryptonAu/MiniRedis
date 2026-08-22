@@ -1,6 +1,7 @@
 #include "commands/registry.h"
 
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <cctype>
 
@@ -14,25 +15,43 @@
 
 namespace miniredis {
 
-static std::string NormalizeName(std::string_view name) {
-  std::string result;
-  result.reserve(name.size());
-  for (char c : name)
-    result.push_back(
-        static_cast<char>(std::toupper(static_cast<unsigned char>(c))));
-  return result;
+namespace {
+
+// Command names are short (the longest registered name is well below this),
+// so lookups can normalize into a fixed-size stack buffer instead of
+// allocating a std::string on every dispatch.
+constexpr size_t kMaxCommandNameLength = 64;
+
+// Writes the uppercase form of `name` into `out`. `out` must have room for at
+// least name.size() characters; it may alias `name` for in-place
+// normalization.
+void UpperCaseInto(char* out, std::string_view name) {
+  for (size_t i = 0; i < name.size(); ++i) {
+    out[i] =
+        static_cast<char>(std::toupper(static_cast<unsigned char>(name[i])));
+  }
 }
 
+}  // namespace
+
 void CommandRegistry::Register(CommandInfo info) {
-  std::string key = NormalizeName(info.name);
-  assert(commands_.find(key) == commands_.end() &&
+  // Normalize the name in place — no temporary string.
+  UpperCaseInto(info.name.data(), info.name);
+  assert(commands_.find(info.name) == commands_.end() &&
          "Duplicate command registration");
-  commands_.emplace(std::move(key), std::move(info));
+  commands_.emplace(info.name, std::move(info));
 }
 
 const CommandInfo* CommandRegistry::Find(std::string_view name) const {
-  std::string key = NormalizeName(name);
-  auto it = commands_.find(key);
+  // C++20 heterogeneous lookup: normalize into a stack buffer (command names
+  // are short) and pass a string_view to find() — no std::string temporary
+  // or heap allocation.
+  if (name.size() > kMaxCommandNameLength) {
+    return nullptr;  // No registered command name is this long.
+  }
+  std::array<char, kMaxCommandNameLength> buffer;
+  UpperCaseInto(buffer.data(), name);
+  auto it = commands_.find(std::string_view(buffer.data(), name.size()));
   return it != commands_.end() ? &it->second : nullptr;
 }
 
