@@ -7,7 +7,16 @@
 #include <thread>
 #include <vector>
 
+#include "context_test_util.h"
+
 namespace miniredis {
+
+struct CmdContextTestPeer {
+  static bool ConsumerWaiting(const CmdContext& ctx) {
+    return ctx.consumer_waiting_.value.load(std::memory_order_acquire);
+  }
+};
+
 namespace {
 
 struct TestCmdOp : CmdOpBase {
@@ -98,6 +107,156 @@ TEST(CmdContextTest, EnqueueReturnsFalseWhenRingIsFull) {
   EXPECT_FALSE(third.stopped);
 }
 
+TEST(CmdContextTest, BatchBeforeRunDoesNotNotify) {
+  CmdContext ctx(8);
+  std::vector<int> order;
+  for (int i = 0; i < 8; ++i) {
+    ASSERT_TRUE(ctx.PostFunction([&, i] {
+      order.push_back(i);
+      if (i == 7) ctx.Stop();
+    }));
+  }
+  EXPECT_FALSE(CmdContextTestPeer::ConsumerWaiting(ctx));
+  EXPECT_FALSE(ctx.PostFunction([] {}));
+  EXPECT_FALSE(CmdContextTestPeer::ConsumerWaiting(ctx));
+
+  std::thread consumer([&] { ctx.Run(); });
+  consumer.join();
+  EXPECT_EQ(order, (std::vector<int>{0, 1, 2, 3, 4, 5, 6, 7}));
+}
+
+TEST(CmdContextTest, EnqueueWhileConsumerExecutesDoesNotNotify) {
+  CmdContext ctx(64);
+  std::atomic<bool> entered{false};
+  std::atomic<bool> release{false};
+  std::atomic<int> completed{0};
+  std::vector<int> order;
+  ASSERT_TRUE(ctx.PostFunction([&] {
+    entered.store(true, std::memory_order_release);
+    while (!release.load(std::memory_order_acquire)) {
+      std::this_thread::yield();
+    }
+  }));
+  std::thread consumer([&] { ctx.Run(); });
+  const bool executing =
+      test::WaitFor([&] { return entered.load(std::memory_order_acquire); });
+  EXPECT_TRUE(executing);
+  if (executing) {
+    EXPECT_FALSE(CmdContextTestPeer::ConsumerWaiting(ctx));
+    for (int i = 0; i < 64; ++i) {
+      EXPECT_TRUE(ctx.PostFunction([&, i] {
+        order.push_back(i);
+        completed.fetch_add(1, std::memory_order_release);
+      }));
+    }
+    EXPECT_FALSE(CmdContextTestPeer::ConsumerWaiting(ctx));
+  }
+  release.store(true, std::memory_order_release);
+  if (executing) {
+    EXPECT_TRUE(test::WaitFor(
+        [&] { return completed.load(std::memory_order_acquire) == 64; }));
+  }
+  ctx.Stop();
+  consumer.join();
+  ASSERT_EQ(order.size(), 64u);
+  for (int i = 0; i < 64; ++i) {
+    EXPECT_EQ(order[static_cast<size_t>(i)], i);
+  }
+}
+
+TEST(CmdContextTest, RepeatedEmptyTransitionsAndRingWrapDoNotLoseWakeup) {
+  CmdContext ctx(4);
+  std::atomic<int> completed{0};
+  std::vector<int> order;
+  std::thread consumer([&] { ctx.Run(); });
+
+  constexpr int kRounds = 1000;
+  constexpr int kBatchSize = 3;
+  for (int round = 0; round < kRounds; ++round) {
+    // Alternate a registered wait with a race against the consumer returning
+    // from the previous callback and preparing to wait.
+    if (round % 2 == 0) {
+      const bool waiting = test::WaitFor(
+          [&] { return CmdContextTestPeer::ConsumerWaiting(ctx); });
+      EXPECT_TRUE(waiting);
+      if (!waiting) break;
+    }
+    for (int i = 0; i < kBatchSize; ++i) {
+      const int id = round * kBatchSize + i;
+      EXPECT_TRUE(ctx.PostFunction([&, id] {
+        order.push_back(id);
+        completed.fetch_add(1, std::memory_order_release);
+      }));
+    }
+    const bool drained = test::WaitFor([&] {
+      return completed.load(std::memory_order_acquire) ==
+             (round + 1) * kBatchSize;
+    });
+    EXPECT_TRUE(drained);
+    if (!drained) break;
+  }
+
+  ctx.Stop();
+  consumer.join();
+  ASSERT_EQ(order.size(), static_cast<size_t>(kRounds * kBatchSize));
+  for (size_t i = 0; i < order.size(); ++i) {
+    EXPECT_EQ(order[i], static_cast<int>(i));
+  }
+}
+
+TEST(CmdContextTest, StopWakesRegisteredWait) {
+  CmdContext ctx;
+  std::atomic<bool> finished{false};
+  std::thread consumer([&] {
+    ctx.Run();
+    finished.store(true, std::memory_order_release);
+  });
+  EXPECT_TRUE(
+      test::WaitFor([&] { return CmdContextTestPeer::ConsumerWaiting(ctx); }));
+  ctx.Stop();
+  EXPECT_TRUE(
+      test::WaitFor([&] { return finished.load(std::memory_order_acquire); }));
+  consumer.join();
+}
+
+TEST(CmdContextTest, StopBeforeRunDoesNotWait) {
+  CmdContext ctx;
+  ctx.Stop();
+  std::atomic<bool> finished{false};
+  std::thread consumer([&] {
+    ctx.Run();
+    finished.store(true, std::memory_order_release);
+  });
+  EXPECT_TRUE(
+      test::WaitFor([&] { return finished.load(std::memory_order_acquire); }));
+  consumer.join();
+}
+
+TEST(CmdContextTest, StopWhileConsumerExecutesDoesNotWait) {
+  CmdContext ctx;
+  std::atomic<bool> entered{false};
+  std::atomic<bool> release{false};
+  std::atomic<bool> finished{false};
+  ASSERT_TRUE(ctx.PostFunction([&] {
+    entered.store(true, std::memory_order_release);
+    while (!release.load(std::memory_order_acquire)) {
+      std::this_thread::yield();
+    }
+  }));
+  std::thread consumer([&] {
+    ctx.Run();
+    finished.store(true, std::memory_order_release);
+  });
+  EXPECT_TRUE(
+      test::WaitFor([&] { return entered.load(std::memory_order_acquire); }));
+  EXPECT_FALSE(CmdContextTestPeer::ConsumerWaiting(ctx));
+  ctx.Stop();
+  release.store(true, std::memory_order_release);
+  EXPECT_TRUE(
+      test::WaitFor([&] { return finished.load(std::memory_order_acquire); }));
+  consumer.join();
+}
+
 TEST(CmdContextTest, StopWakesRunAndStopsQueuedOps) {
   CmdContext ctx;
   auto sched = ctx.get_scheduler();
@@ -125,7 +284,8 @@ TEST(CmdContextTest, StopConcurrentWithSingleProducerDoesNotLoseWakeup) {
     CmdContext ctx(8);
     std::atomic<bool> start{false};
     std::atomic<bool> finished{false};
-    std::atomic<int> completed{0};
+    TestCmdOp ops[64];
+    int accepted = 0;
 
     std::thread cmd_thread([&] {
       ctx.Run();
@@ -137,10 +297,10 @@ TEST(CmdContextTest, StopConcurrentWithSingleProducerDoesNotLoseWakeup) {
         std::this_thread::yield();
       }
       for (int i = 0; i < 64; i++) {
-        if (!ctx.PostFunction(
-                [&] { completed.fetch_add(1, std::memory_order_relaxed); })) {
+        if (!ctx.Enqueue(&ops[i])) {
           break;
         }
+        ++accepted;
       }
     });
 
@@ -150,7 +310,11 @@ TEST(CmdContextTest, StopConcurrentWithSingleProducerDoesNotLoseWakeup) {
     cmd_thread.join();
 
     EXPECT_TRUE(finished.load(std::memory_order_acquire));
-    EXPECT_GE(completed.load(std::memory_order_relaxed), 0);
+    for (int i = 0; i < 64; ++i) {
+      EXPECT_EQ(
+          static_cast<int>(ops[i].completed) + static_cast<int>(ops[i].stopped),
+          i < accepted ? 1 : 0);
+    }
   }
 }
 

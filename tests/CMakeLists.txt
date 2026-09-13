@@ -60,7 +60,7 @@ add_executable(miniredis_io_test
 )
 target_link_libraries(miniredis_io_test PRIVATE miniredis_io GTest::gtest_main)
 target_compile_features(miniredis_io_test PRIVATE cxx_std_20)
-gtest_discover_tests(miniredis_io_test)
+gtest_discover_tests(miniredis_io_test PROPERTIES TIMEOUT 60)
 
 add_executable(miniredis_persistence_test
     persistence/crc64_test.cpp

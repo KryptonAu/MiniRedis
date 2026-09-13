@@ -126,13 +126,19 @@ bool EpollContext::IsOnThread() const noexcept {
 bool EpollContext::Enqueue(EpollOpBase* op) noexcept {
   if (stopping_.load(std::memory_order_acquire)) return false;
 
-  op->next_ = head_.load(std::memory_order_relaxed);
-  while (!head_.compare_exchange_weak(op->next_, op, std::memory_order_release,
-                                      std::memory_order_relaxed)) {
-  }
+  auto* previous = head_.load(std::memory_order_relaxed);
+  do {
+    op->next_ = previous;
+  } while (!head_.compare_exchange_weak(previous, op, std::memory_order_release,
+                                        std::memory_order_relaxed));
 
-  uint64_t one = 1;
-  while (::write(wake_fd_, &one, sizeof(one)) < 0 && errno == EINTR) {
+  // Only the producer that changes the shared queue from empty to nonempty
+  // needs to wake the consumer. Do not access op after publication: it may
+  // already have been completed and destroyed by the IO thread.
+  if (previous == nullptr) {
+    uint64_t one = 1;
+    while (::write(wake_fd_, &one, sizeof(one)) < 0 && errno == EINTR) {
+    }
   }
   return true;
 }

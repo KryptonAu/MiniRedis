@@ -1,13 +1,179 @@
 #include "io/epoll_context.h"
 
 #include <gtest/gtest.h>
+#include <sys/eventfd.h>
+#include <unistd.h>
 
+#include <array>
 #include <atomic>
+#include <cerrno>
+#include <functional>
 #include <stdexec/execution.hpp>
 #include <thread>
+#include <vector>
+
+#include "context_test_util.h"
 
 namespace miniredis {
+
+struct EpollContextTestPeer {
+  static int WakeFd(const EpollContext& ctx) { return ctx.wake_fd_; }
+};
+
 namespace {
+
+struct TestEpollOp : EpollOpBase {
+  std::function<void()> on_complete = [] {};
+
+  void Complete() noexcept override { on_complete(); }
+};
+
+struct SelfDeletingEpollOp : TestEpollOp {
+  void Complete() noexcept override {
+    on_complete();
+    delete this;
+  }
+};
+
+TEST(EpollContextTest, BatchBeforeRunOnlyNotifiesOnEmptyTransition) {
+  EpollContext ctx;
+  std::array<TestEpollOp, 64> ops;
+  std::vector<size_t> order;
+  for (size_t i = 0; i < ops.size(); ++i) {
+    ops[i].on_complete = [&, i] {
+      order.push_back(i);
+      if (i == ops.size() - 1) ctx.Stop();
+    };
+    ASSERT_TRUE(ctx.Enqueue(&ops[i]));
+  }
+
+  eventfd_t notifications = 0;
+  ASSERT_EQ(::eventfd_read(EpollContextTestPeer::WakeFd(ctx), &notifications),
+            0);
+  EXPECT_EQ(notifications, 1u);
+  EXPECT_EQ(::eventfd_read(EpollContextTestPeer::WakeFd(ctx), &notifications),
+            -1);
+  EXPECT_EQ(errno, EAGAIN);
+
+  std::thread consumer([&] { ctx.Run(); });
+  consumer.join();
+  ASSERT_EQ(order.size(), ops.size());
+  for (size_t i = 0; i < order.size(); ++i) EXPECT_EQ(order[i], i);
+}
+
+TEST(EpollContextTest, EnqueueWhileConsumerExecutesWakesNextBatch) {
+  EpollContext ctx;
+  TestEpollOp blocker;
+  std::array<TestEpollOp, 64> ops;
+  std::atomic<bool> entered{false};
+  std::atomic<bool> release{false};
+  std::atomic<size_t> completed{0};
+  std::vector<size_t> order;
+  blocker.on_complete = [&] {
+    entered.store(true, std::memory_order_release);
+    while (!release.load(std::memory_order_acquire)) {
+      std::this_thread::yield();
+    }
+  };
+  ASSERT_TRUE(ctx.Enqueue(&blocker));
+  // Remove the initial notification so the new batch must provide its own
+  // wakeup when Run finishes the blocker and enters epoll_wait.
+  eventfd_t notifications = 0;
+  ASSERT_EQ(::eventfd_read(EpollContextTestPeer::WakeFd(ctx), &notifications),
+            0);
+  std::thread consumer([&] { ctx.Run(); });
+  const bool executing =
+      test::WaitFor([&] { return entered.load(std::memory_order_acquire); });
+  EXPECT_TRUE(executing);
+  if (executing) {
+    for (size_t i = 0; i < ops.size(); ++i) {
+      ops[i].on_complete = [&, i] {
+        order.push_back(i);
+        completed.fetch_add(1, std::memory_order_release);
+      };
+      EXPECT_TRUE(ctx.Enqueue(&ops[i]));
+    }
+  }
+  release.store(true, std::memory_order_release);
+  if (executing) {
+    EXPECT_TRUE(test::WaitFor([&] {
+      return completed.load(std::memory_order_acquire) == ops.size();
+    }));
+  }
+  ctx.Stop();
+  consumer.join();
+  ASSERT_EQ(order.size(), ops.size());
+  for (size_t i = 0; i < order.size(); ++i) EXPECT_EQ(order[i], i);
+}
+
+TEST(EpollContextTest, RepeatedEmptyTransitionsDoNotLoseWakeup) {
+  EpollContext ctx;
+  constexpr size_t kRounds = 1000;
+  std::array<TestEpollOp, kRounds> ops;
+  std::array<int, kRounds> completions{};
+  std::atomic<size_t> completed{0};
+  std::thread consumer([&] { ctx.Run(); });
+  for (size_t i = 0; i < kRounds; ++i) {
+    ops[i].on_complete = [&, i] {
+      ++completions[i];
+      completed.fetch_add(1, std::memory_order_release);
+    };
+    EXPECT_TRUE(ctx.Enqueue(&ops[i]));
+    const bool drained = test::WaitFor(
+        [&] { return completed.load(std::memory_order_acquire) == i + 1; });
+    EXPECT_TRUE(drained);
+    if (!drained) break;
+  }
+  ctx.Stop();
+  consumer.join();
+  for (int count : completions) EXPECT_EQ(count, 1);
+}
+
+TEST(EpollContextTest, ConcurrentProducersCompleteOnceInProducerOrder) {
+  EpollContext ctx;
+  constexpr size_t kProducers = 4;
+  constexpr size_t kOpsPerProducer = 256;
+  std::array<std::vector<size_t>, kProducers> order;
+  std::array<std::array<int, kOpsPerProducer>, kProducers> completions{};
+  std::atomic<size_t> completed{0};
+  std::atomic<bool> start{false};
+  std::thread consumer([&] { ctx.Run(); });
+  std::array<std::thread, kProducers> producers;
+  for (size_t producer = 0; producer < kProducers; ++producer) {
+    producers[producer] = std::thread([&, producer] {
+      while (!start.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+      }
+      for (size_t i = 0; i < kOpsPerProducer; ++i) {
+        auto* op = new SelfDeletingEpollOp;
+        op->on_complete = [&, producer, i] {
+          order[producer].push_back(i);
+          ++completions[producer][i];
+          completed.fetch_add(1, std::memory_order_release);
+        };
+        const bool accepted = ctx.Enqueue(op);
+        EXPECT_TRUE(accepted);
+        if (!accepted) delete op;
+        if (i % 8 == 0) std::this_thread::yield();
+      }
+    });
+  }
+  start.store(true, std::memory_order_release);
+  for (auto& producer : producers) producer.join();
+  EXPECT_TRUE(test::WaitFor([&] {
+    return completed.load(std::memory_order_acquire) ==
+           kProducers * kOpsPerProducer;
+  }));
+  ctx.Stop();
+  consumer.join();
+  for (size_t producer = 0; producer < kProducers; ++producer) {
+    ASSERT_EQ(order[producer].size(), kOpsPerProducer);
+    for (size_t i = 0; i < kOpsPerProducer; ++i) {
+      EXPECT_EQ(order[producer][i], i);
+      EXPECT_EQ(completions[producer][i], 1);
+    }
+  }
+}
 
 TEST(EpollContextTest, SchedulerIsCopyable) {
   EpollContext ctx;

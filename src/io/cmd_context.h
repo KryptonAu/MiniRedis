@@ -127,6 +127,8 @@ class CmdContext {
   bool PostFunction(std::function<void()> fn);
 
  private:
+  friend struct CmdContextTestPeer;
+
   CmdOpBase* TryDequeue() noexcept;
   void WakeConsumer() noexcept;
   void FinishEnqueue() noexcept;
@@ -146,8 +148,9 @@ class CmdContext {
   size_t queue_mask_ = 0;
   PaddedAtomicSize head_;
   PaddedAtomicSize tail_;
-  PaddedAtomicSize wake_sequence_;
   PaddedAtomicSize active_enqueues_;
+  // Only Run() sets this to true; wakeup sources exchange it to false.
+  PaddedAtomicBool consumer_waiting_;
   PaddedAtomicBool stopping_;
   std::thread::id cmd_thread_id_{};
 };
@@ -205,20 +208,27 @@ inline void CmdContext::Run() {
       break;
     }
 
-    const size_t observed =
-        wake_sequence_.value.load(std::memory_order_acquire);
+    // Both sides exchange this flag. If the producer exchanges first, acquire
+    // makes its publication visible to the second dequeue; otherwise the
+    // producer clears the waiting request and notifies the consumer.
+    // Replacing the exchanges with plain loads/stores can lose a wakeup.
+    consumer_waiting_.value.exchange(true, std::memory_order_acq_rel);
 
     if (auto* op = TryDequeue(); op != nullptr) {
+      consumer_waiting_.value.store(false, std::memory_order_release);
       op->Complete();
       continue;
     }
 
     if (stopping_.value.load(std::memory_order_acquire) &&
         active_enqueues_.value.load(std::memory_order_acquire) == 0) {
+      consumer_waiting_.value.store(false, std::memory_order_release);
       break;
     }
 
-    wake_sequence_.value.wait(observed, std::memory_order_acquire);
+    // A wakeup before wait() leaves false, so wait cannot miss it. Only this
+    // consumer can set true again, after wait returns: there is no ABA here.
+    consumer_waiting_.value.wait(true, std::memory_order_acquire);
   }
 
   // Drain remaining queued operations — complete them with set_stopped.
@@ -258,8 +268,8 @@ inline bool CmdContext::Enqueue(CmdOpBase* op) noexcept {
 
   queue_[tail & queue_mask_] = op;
   tail_.value.store(tail + 1, std::memory_order_release);
-  FinishEnqueue();
   WakeConsumer();
+  FinishEnqueue();
   return true;
 }
 
@@ -276,8 +286,11 @@ inline CmdOpBase* CmdContext::TryDequeue() noexcept {
 }
 
 inline void CmdContext::WakeConsumer() noexcept {
-  wake_sequence_.value.fetch_add(1, std::memory_order_release);
-  wake_sequence_.value.notify_one();
+  // Always exchange, even when not waiting, to publish work/stop state to the
+  // consumer's next acquire exchange before its final queue/stop checks.
+  if (consumer_waiting_.value.exchange(false, std::memory_order_acq_rel)) {
+    consumer_waiting_.value.notify_one();
+  }
 }
 
 inline void CmdContext::FinishEnqueue() noexcept {

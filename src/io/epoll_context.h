@@ -140,6 +140,8 @@ class EpollContext {
   void DisarmTimer() noexcept;
 
  private:
+  friend struct EpollContextTestPeer;
+
   void ProcessReadyQueue();
   void DrainWakeFd() noexcept;
   void ProcessIoEvent(int fd, uint32_t events) noexcept;
