@@ -2,6 +2,7 @@
 
 #include <unistd.h>
 
+#include <array>
 #include <exec/async_scope.hpp>
 #include <exec/task.hpp>
 #include <functional>
@@ -55,8 +56,15 @@ inline exec::task<void> handle_client(
   try {
     auto& parser = client->Parser();
     auto& query_buf = client->QueryBuffer();
-    auto& arg_storage = client->ArgStorage();
     auto& reply_buf = client->ReplyBuffer();
+
+    // Pipelined requests are parsed and executed as a batch, so a batch of N
+    // commands costs one CMD-thread hand-off instead of N. Each slot owns the
+    // argument views of one command in the batch; the bulk bytes stay in
+    // QueryBuffer.
+    constexpr size_t kMaxBatch = 16;
+    std::array<CommandArgStorage, kMaxBatch> batch_storage;
+    std::array<std::span<const std::string_view>, kMaxBatch> batch_args;
 
     while (true) {
       std::span<char> write_buf = query_buf.PrepareWrite();
@@ -66,47 +74,82 @@ inline exec::task<void> handle_client(
       query_buf.CommitWrite(read.bytes_read);
 
       while (true) {
-        size_t consumed = 0;
-        std::string reply;
-        {
+        // Parse every complete command currently buffered, up to kMaxBatch.
+        const std::string_view readable = query_buf.Readable();
+        size_t scanned = 0;
+        size_t count = 0;
+        bool protocol_error = false;
+        while (count < kMaxBatch) {
           RespParseResult parsed =
-              parser.ParseNext(query_buf.Readable(), arg_storage);
+              parser.ParseNext(readable.substr(scanned), batch_storage[count]);
           if (parsed.status == ParseStatus::kIncomplete) break;
           if (parsed.status == ParseStatus::kError) {
-            std::string err_reply = RespReply::Error("ERR protocol error");
-            AsyncWriteSender writer{io_sched.GetContext(), client_fd,
-                                    std::move(err_reply)};
-            (void)co_await std::move(writer);
-            co_return;
+            protocol_error = true;
+            break;
           }
-
-          consumed = parsed.consumed;
-          RespCommand command = std::move(parsed.command);
-          reply = co_await stdexec::starts_on(
-              cmd_sched,
-              stdexec::just(std::move(command)) |
-                  stdexec::then([&](RespCommand cmd_args) {
-                    Database* db = server.GetDbFor(*client);
-                    if (db == nullptr) {
-                      return RespReply::Error("ERR invalid DB index");
-                    }
-                    CommandContext ctx{server, *client, *db};
-                    // The callbacks are owned by this coroutine frame and
-                    // only used while executing this awaited command. Keep a
-                    // reference wrapper in CommandContext to avoid cloning
-                    // their type-erased targets for every request.
-                    if (propagate) ctx.propagate = std::cref(propagate);
-                    if (apply_config) {
-                      ctx.apply_config = std::cref(apply_config);
-                    }
-                    return ExecuteCommand(registry, ctx, cmd_args.Args());
-                  }));
+          batch_args[count] = parsed.command.Args();
+          scanned += parsed.consumed;
+          ++count;
         }
-        // Transfer back to the IO thread before touching parser/reply_buf.
-        co_await io_sched.schedule();
-        query_buf.Consume(consumed);
-        arg_storage.ReleaseOversizedHeap();
-        reply_buf += reply;
+
+        if (count > 0) {
+          // One sender operation for the whole batch: the CMD thread runs the
+          // loop and returns one aggregated reply blob. Composing the
+          // scheduler sender directly with `then` (rather than
+          // `starts_on(cmd_sched, just() | then(...))`) drops an extra value
+          // sender and the `schedule_from` sequencing op state.
+          std::string replies =
+              co_await (cmd_sched.schedule() | stdexec::then([&]() {
+                          std::string out;
+                          for (size_t i = 0; i < count; ++i) {
+                            // Resolved per command so a SELECT inside the
+                            // batch affects every following command.
+                            Database* db = server.GetDbFor(*client);
+                            if (db == nullptr) {
+                              out += RespReply::Error("ERR invalid DB index");
+                              continue;
+                            }
+                            CommandContext ctx{server, *client, *db};
+                            // The callbacks are owned by this coroutine frame
+                            // and only used while executing this awaited
+                            // batch. Keep a reference wrapper in
+                            // CommandContext to avoid cloning their
+                            // type-erased targets for every request.
+                            if (propagate) ctx.propagate = std::cref(propagate);
+                            if (apply_config) {
+                              ctx.apply_config = std::cref(apply_config);
+                            }
+                            out += ExecuteCommand(registry, ctx, batch_args[i]);
+                          }
+                          return out;
+                        }));
+          // `exec::task`'s sticky scheduler already resumed this coroutine on
+          // the IO thread, so touching parser/reply_buf here is safe without an
+          // extra hand-off. An explicit `co_await io_sched.schedule()` at this
+          // point only added an eventfd wakeup plus a ready-queue round trip
+          // per command (measured: ~57-68% of pipelined throughput).
+          query_buf.Consume(scanned);
+          for (size_t i = 0; i < count; ++i) {
+            batch_storage[i].ReleaseOversizedHeap();
+          }
+          reply_buf += replies;
+        }
+
+        if (protocol_error) {
+          // Flush the replies of the commands that were already executed
+          // before the malformed bytes, like Redis does, then report the
+          // protocol error and drop the connection.
+          reply_buf += RespReply::Error("ERR protocol error");
+          std::string out = std::exchange(reply_buf, {});
+          AsyncWriteSender writer{io_sched.GetContext(), client_fd,
+                                  std::move(out)};
+          (void)co_await std::move(writer);
+          co_return;
+        }
+
+        // A short batch means parsing stopped on a partial command, so go read
+        // more; a full batch may still have complete commands behind it.
+        if (count < kMaxBatch) break;
       }
 
       if (!reply_buf.empty()) {
