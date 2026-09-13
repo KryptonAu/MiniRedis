@@ -10,6 +10,130 @@ uint16_t HeaderCount(const Listpack& lp) {
   return static_cast<uint16_t>(data[4]) | (static_cast<uint16_t>(data[5]) << 8);
 }
 
+void ExpectContentsAndRoundTrip(const Listpack& lp,
+                                const std::vector<std::string>& expected,
+                                uint16_t count_header) {
+  EXPECT_EQ(lp.Size(), expected.size());
+  EXPECT_EQ(HeaderCount(lp), count_header);
+  EXPECT_EQ(lp.TotalBytes(), lp.DataSize());
+  ASSERT_GE(lp.DataSize(), 7u);
+  EXPECT_EQ(lp.Data()[lp.DataSize() - 1], 0xFF);
+
+  auto restored = Listpack::FromBytes(
+      std::vector<uint8_t>(lp.Data(), lp.Data() + lp.DataSize()));
+  ASSERT_TRUE(restored.has_value());
+  EXPECT_EQ(HeaderCount(*restored), count_header);
+  EXPECT_EQ(restored->Size(), expected.size());
+  auto it = lp.begin();
+  for (size_t i = 0; i < expected.size(); ++i) {
+    ASSERT_TRUE(it.Valid());
+    EXPECT_EQ((*it).ToString(), expected[i]);
+    ASSERT_TRUE(lp.Get(i).has_value());
+    EXPECT_EQ(lp.Get(i)->ToString(), expected[i]);
+    ASSERT_TRUE(restored->Get(i).has_value());
+    EXPECT_EQ(restored->Get(i)->ToString(), expected[i]);
+    ++it;
+  }
+  EXPECT_EQ(it, lp.end());
+}
+
+TEST(ListpackTest, PopBackEmptyAndReuse) {
+  Listpack lp;
+  EXPECT_FALSE(lp.PopBack().has_value());
+  ExpectContentsAndRoundTrip(lp, {}, 0);
+  for (int i = 0; i < 3; ++i) {
+    ASSERT_TRUE(lp.Append("tail"));
+    EXPECT_EQ(lp.PopBack(), "tail");
+    EXPECT_FALSE(lp.PopBack().has_value());
+    ExpectContentsAndRoundTrip(lp, {}, 0);
+  }
+}
+
+TEST(ListpackTest, PopBackMixedValuesOwnsReturnedStrings) {
+  Listpack lp;
+  std::vector<std::string> values = {"head", "", std::string("a\0b", 3),
+                                     "-123", std::string(5000, 'x')};
+  for (const auto& value : values) ASSERT_TRUE(lp.Append(value));
+  std::vector<std::string> popped;
+  while (!values.empty()) {
+    auto value = lp.PopBack();
+    ASSERT_TRUE(value.has_value());
+    EXPECT_EQ(*value, values.back());
+    popped.push_back(std::move(*value));
+    values.pop_back();
+    ExpectContentsAndRoundTrip(lp, values,
+                               static_cast<uint16_t>(values.size()));
+  }
+  ASSERT_TRUE(lp.Append(std::string(10000, 'y')));
+  EXPECT_EQ(popped, (std::vector<std::string>{std::string(5000, 'x'), "-123",
+                                             std::string("a\0b", 3), "", "head"}));
+}
+
+TEST(ListpackTest, PopBackAllIntegerEncodings) {
+  Listpack lp;
+  const std::vector<int64_t> integers = {
+      0, 127, 128, -1, -4096, 4095, -4097, 4096, -32768, 32767,
+      -32769, 32768, -8388608, 8388607, -8388609, 8388608,
+      INT32_MIN, INT32_MAX, int64_t{INT32_MIN} - 1,
+      int64_t{INT32_MAX} + 1, INT64_MIN, INT64_MAX};
+  std::vector<std::string> expected;
+  for (int64_t value : integers) {
+    ASSERT_TRUE(lp.Append(value));
+    expected.push_back(std::to_string(value));
+  }
+  while (!expected.empty()) {
+    EXPECT_EQ(lp.PopBack(), expected.back());
+    expected.pop_back();
+    ExpectContentsAndRoundTrip(lp, expected,
+                               static_cast<uint16_t>(expected.size()));
+  }
+}
+
+TEST(ListpackTest, PopBackStringEncodingAndBacklenBoundaries) {
+  // String header transitions (1/2/5 bytes), followed by payload lengths
+  // around the 1/2/3/4-byte backlen transitions, including the header.
+  const std::vector<size_t> lengths = {
+      0, 63, 64, 4095, 4096, 124, 125, 126,
+      16377, 16378, 16379, 2097145, 2097146, 2097147};
+  for (size_t length : lengths) {
+    SCOPED_TRACE(length);
+    Listpack lp;
+    ASSERT_TRUE(lp.Append("prefix"));
+    const size_t prefix_bytes = lp.DataSize();
+    std::string value(length, 'x');
+    const size_t payload = length + (length < 64 ? 1u : length < 4096 ? 2u : 5u);
+    const size_t backlen = payload <= 127 ? 1u : payload < 16383 ? 2u
+                                                  : payload < 2097151 ? 3u : 4u;
+    ASSERT_EQ(Listpack::EncodedEntrySize(value), payload + backlen);
+    ASSERT_TRUE(lp.Append(value));
+    EXPECT_EQ(lp.DataSize(), prefix_bytes + payload + backlen);
+    ExpectContentsAndRoundTrip(lp, {"prefix", value}, 2);
+    EXPECT_EQ(lp.PopBack(), value);
+    EXPECT_EQ(lp.DataSize(), prefix_bytes);
+    ExpectContentsAndRoundTrip(lp, {"prefix"}, 1);
+  }
+}
+
+TEST(ListpackTest, PopBackKeepsUnknownCountHeaderThroughEmptyAndReuse) {
+  Listpack source;
+  std::vector<std::string> expected = {"first", "42", "", "last"};
+  for (const auto& value : expected) ASSERT_TRUE(source.Append(value));
+  std::vector<uint8_t> bytes(source.Data(), source.Data() + source.DataSize());
+  bytes[4] = bytes[5] = 0xFF;
+  auto lp = Listpack::FromBytes(std::move(bytes));
+  ASSERT_TRUE(lp.has_value());
+  while (!expected.empty()) {
+    EXPECT_EQ(lp->PopBack(), expected.back());
+    expected.pop_back();
+    ExpectContentsAndRoundTrip(*lp, expected, UINT16_MAX);
+  }
+  EXPECT_FALSE(lp->PopBack().has_value());
+  ASSERT_TRUE(lp->Append("again"));
+  ExpectContentsAndRoundTrip(*lp, {"again"}, UINT16_MAX);
+  EXPECT_EQ(lp->PopBack(), "again");
+  ExpectContentsAndRoundTrip(*lp, {}, UINT16_MAX);
+}
+
 // ===== Construction =====
 TEST(ListpackTest, ConstructEmpty) {
   Listpack lp;

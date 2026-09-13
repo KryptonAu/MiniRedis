@@ -40,6 +40,48 @@ TEST(QuicklistTest, PushTailAndPopTail) {
   EXPECT_EQ(*val, "world");
 }
 
+TEST(QuicklistTest, PopTailDrainsMultipleNodesAndReusesList) {
+  Quicklist ql;
+  std::vector<std::string> values;
+  for (int i = 0; i < 3000; ++i) {
+    values.push_back(std::string(24, 'x') + std::to_string(i));
+    ql.PushTail(values.back());
+  }
+  ASSERT_GT(ql.NodeCount(), 2u);
+  while (!values.empty()) {
+    const size_t nodes_before = ql.NodeCount();
+    EXPECT_EQ(ql.PopTail(), values.back());
+    values.pop_back();
+    EXPECT_EQ(ql.Size(), values.size());
+    EXPECT_LE(ql.NodeCount(), nodes_before);
+    EXPECT_GE(ql.NodeCount(), nodes_before - 1);
+    if (!values.empty()) {
+      EXPECT_EQ(ql.Get(ql.Size() - 1), values.back());
+    }
+  }
+  EXPECT_TRUE(ql.Empty());
+  EXPECT_EQ(ql.NodeCount(), 0u);
+  EXPECT_FALSE(ql.PopTail().has_value());
+  ql.PushTail("again");
+  EXPECT_EQ(ql.NodeCount(), 1u);
+  EXPECT_EQ(ql.PopTail(), "again");
+  EXPECT_EQ(ql.NodeCount(), 0u);
+}
+
+TEST(QuicklistTest, PopTailReleasesOversizedNodeAndKeepsOwnedValue) {
+  Quicklist ql;
+  ql.PushTail("head");
+  const std::string large(20000, 'x');
+  ql.PushTail(large);
+  ASSERT_EQ(ql.NodeCount(), 2u);
+  auto popped = ql.PopTail();
+  EXPECT_EQ(ql.NodeCount(), 1u);
+  EXPECT_EQ(ql.Size(), 1u);
+  EXPECT_EQ(ql.PopTail(), "head");
+  ql.PushTail(std::string(20000, 'y'));
+  EXPECT_EQ(popped, large);
+}
+
 TEST(QuicklistTest, MultiplePushHead) {
   Quicklist ql;
   ql.PushHead(std::string_view("c"));

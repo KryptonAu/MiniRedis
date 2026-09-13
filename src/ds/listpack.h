@@ -44,6 +44,8 @@ class Listpack {
   bool Replace(size_t index, std::string_view value);
   bool Replace(size_t index, int64_t value);
   bool Delete(size_t index);
+  // Returns an owned value; locating/removing the tail does not scan entries.
+  std::optional<std::string> PopBack();
   bool Append(std::string_view value);
   bool Append(int64_t value);
   bool Prepend(std::string_view value);
@@ -61,6 +63,8 @@ class Listpack {
 
   size_t EntryCount() const;
   std::optional<size_t> Seek(size_t index) const;
+  std::optional<size_t> SeekLast() const;
+  Value DecodeValueAt(size_t pos) const;
   size_t SeekInsertPosition(size_t index) const;
   size_t DecodeBacklenEndingAt(size_t pos) const;
   size_t EncodedPayloadSizeAt(size_t pos) const;

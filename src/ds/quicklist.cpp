@@ -178,11 +178,9 @@ std::optional<std::string> Quicklist::PopTail() {
   if (nodes_.empty()) return std::nullopt;
 
   auto& back_node = nodes_.back();
-  size_t last_idx = back_node.lp.Size() - 1;
-  auto val = back_node.lp.Get(last_idx);
-  std::string result = val.has_value() ? val->ToString() : "";
+  auto result = back_node.lp.PopBack();
+  if (!result) return std::nullopt;
 
-  back_node.lp.Delete(last_idx);
   back_node.count--;
   count_--;
 

@@ -345,6 +345,10 @@ std::optional<Listpack::Value> Listpack::Get(size_t index) const {
 
   if (pos + 1 > buf_.size()) return std::nullopt;
 
+  return DecodeValueAt(pos);
+}
+
+Listpack::Value Listpack::DecodeValueAt(size_t pos) const {
   uint8_t first = buf_[pos];
 
   if (IsIntegerEncoding(first)) {
@@ -491,6 +495,20 @@ bool Listpack::Delete(size_t index) {
   return true;
 }
 
+std::optional<std::string> Listpack::PopBack() {
+  auto pos = SeekLast();
+  if (!pos) return std::nullopt;
+
+  // Own the value before invalidating its view or changing the container.
+  // If allocation fails, the listpack is still unchanged.
+  std::string result = DecodeValueAt(*pos).ToString();
+  buf_.resize(*pos + 1);
+  buf_[*pos] = kEof;
+  SetTotalBytesFromBuffer();
+  AdjustHeaderCount(-1);
+  return result;
+}
+
 bool Listpack::Replace(size_t index, std::string_view value) {
   if (index >= Size()) return false;
 
@@ -592,6 +610,15 @@ std::optional<size_t> Listpack::Seek(size_t index) const {
   }
   if (pos >= buf_.size()) return std::nullopt;
   return pos;
+}
+
+std::optional<size_t> Listpack::SeekLast() const {
+  // Size() can scan when the header count is unknown. The byte length is
+  // sufficient to distinguish an empty listpack and locate its EOF.
+  if (buf_.size() <= kHdrSize + 1) return std::nullopt;
+  const size_t eof_pos = buf_.size() - 1;
+  const size_t payload = DecodeBacklenEndingAt(eof_pos - 1);
+  return eof_pos - payload - EncodeBacklen(nullptr, payload);
 }
 
 size_t Listpack::SeekInsertPosition(size_t index) const {
@@ -742,31 +769,7 @@ Listpack::Iterator::Iterator(const Listpack* lp, size_t pos, size_t index)
     : lp_(lp), pos_(pos), index_(index) {}
 
 Listpack::Value Listpack::Iterator::operator*() const {
-  const uint8_t* data = lp_->buf_.data();
-  uint8_t first = data[pos_];
-
-  if (IsIntegerEncoding(first)) {
-    size_t payload_len;
-    int64_t val = DecodeInteger(data + pos_, &payload_len);
-    return Value{Value::Type::kInteger, {}, val};
-  } else {
-    // String encoding
-    size_t str_len;
-    size_t hdr_len;
-    if ((first & kEnc6BitStrMask) == kEnc6BitStr) {
-      str_len = first & 0x3F;
-      hdr_len = 1;
-    } else if ((first & kEnc12BitStrMask) == kEnc12BitStr) {
-      str_len = ((static_cast<size_t>(first & 0x0F)) << 8) | data[pos_ + 1];
-      hdr_len = 2;
-    } else {
-      // 32-bit str
-      str_len = LoadLE32(data + pos_ + 1);
-      hdr_len = 5;
-    }
-    const char* str_data = reinterpret_cast<const char*>(data + pos_ + hdr_len);
-    return Value{Value::Type::kString, std::string_view(str_data, str_len), 0};
-  }
+  return lp_->DecodeValueAt(pos_);
 }
 
 bool Listpack::Iterator::Valid() const {
