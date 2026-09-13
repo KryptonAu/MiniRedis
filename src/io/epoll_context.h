@@ -123,13 +123,12 @@ class EpollContext {
     return stopping_.load(std::memory_order_acquire);
   }
 
+  // May be called from any thread, including CMD when resuming an IO task.
   bool Enqueue(EpollOpBase* op) noexcept;
 
   // -- I/O operation registration (must be called from IO thread) ----------
-  // ArmIo() assumes the caller is on the IO thread; ScheduleArmIo()
-  // is safe from any thread.
+  // Registers readiness, or completes with stopped if the context is stopping.
   void ArmIo(EpollIoOpBase* op);
-  void ScheduleArmIo(EpollIoOpBase* op);
   void CancelFd(int fd) noexcept;
 
   int GetEpollFd() const { return epoll_fd_; }
@@ -155,6 +154,7 @@ class EpollContext {
   int timer_fd_ = -1;
   TimerCallback timer_callback_;
 
+  // Multiple producers enqueue; only the IO thread drains the ready queue.
   std::atomic<EpollOpBase*> head_{nullptr};
   std::atomic<bool> stopping_{false};
   std::thread::id io_thread_id_{};

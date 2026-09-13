@@ -7,12 +7,14 @@
 #include <array>
 #include <atomic>
 #include <cerrno>
+#include <exec/task.hpp>
 #include <functional>
 #include <stdexec/execution.hpp>
 #include <thread>
 #include <vector>
 
 #include "context_test_util.h"
+#include "io/cmd_context.h"
 
 namespace miniredis {
 
@@ -231,6 +233,31 @@ TEST(EpollContextTest, ScheduleFromOtherThreadWakesEpollWait) {
 
   ctx.Stop();
   io_thread.join();
+}
+
+static exec::task<void> CheckCmdRoundTrip(EpollContext& io_ctx,
+                                          CmdContext& cmd_ctx) {
+  EXPECT_TRUE(io_ctx.IsOnThread());
+  co_await (cmd_ctx.get_scheduler().schedule() | stdexec::then([&] {
+              EXPECT_TRUE(cmd_ctx.IsOnThread());
+              EXPECT_FALSE(io_ctx.IsOnThread());
+            }));
+  EXPECT_TRUE(io_ctx.IsOnThread());
+}
+
+TEST(EpollContextTest, TaskReturnsToIoThreadAfterCmdWork) {
+  EpollContext io_ctx;
+  CmdContext cmd_ctx;
+  std::thread io_thread([&] { io_ctx.Run(); });
+  std::thread cmd_thread([&] { cmd_ctx.Run(); });
+
+  stdexec::sync_wait(stdexec::starts_on(io_ctx.get_scheduler(),
+                                        CheckCmdRoundTrip(io_ctx, cmd_ctx)));
+
+  io_ctx.Stop();
+  cmd_ctx.Stop();
+  io_thread.join();
+  cmd_thread.join();
 }
 
 TEST(EpollContextTest, StopCompletesQueuedWorkWithStopped) {

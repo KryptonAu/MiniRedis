@@ -273,19 +273,23 @@ TEST(AsyncIoTest, PendingReadReceivesStoppedOnShutdown) {
   ::close(wfd);
 }
 
-TEST(AsyncIoTest, ScheduleAfterStopCompletesStopped) {
+TEST(AsyncIoTest, ReadStartedOnIoThreadAfterStopCompletesStopped) {
   auto [rfd, wfd] = MakeSocketPair();
 
-  EpollContext ctx;
-  ctx.Stop();
+  IoLoop io;
 
   bool stopped = false;
   std::array<char, 1> read_buf{};
-  auto sender =
-      AsyncReadSender{&ctx, rfd, read_buf} | stdexec::upon_stopped([&] {
-        stopped = true;
-        return AsyncReadResult{};
-      });
+  auto sender = stdexec::starts_on(
+      io.ctx.get_scheduler(),
+      stdexec::just() | stdexec::let_value([&] {
+        io.ctx.Stop();
+        return AsyncReadSender{&io.ctx, rfd, read_buf} |
+               stdexec::upon_stopped([&] {
+                 stopped = true;
+                 return AsyncReadResult{};
+               });
+      }));
   stdexec::sync_wait(std::move(sender));
 
   EXPECT_TRUE(stopped);

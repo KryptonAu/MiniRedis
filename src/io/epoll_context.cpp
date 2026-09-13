@@ -5,6 +5,7 @@
 #include <sys/timerfd.h>
 #include <unistd.h>
 
+#include <cassert>
 #include <cerrno>
 #include <cstdint>
 
@@ -163,41 +164,13 @@ FdState* EpollContext::FindFdState(int fd) noexcept {
   return st.fd == fd ? &st : nullptr;
 }
 
-void EpollContext::ScheduleArmIo(EpollIoOpBase* op) {
+void EpollContext::ArmIo(EpollIoOpBase* op) {
+  assert(IsOnThread());
   if (IsStopping()) {
     op->OnStopped();
     return;
   }
 
-  if (IsOnThread()) {
-    ArmIo(op);
-    return;
-  }
-
-  // Enqueue a thunk that will call ArmIo() when processed on the IO thread.
-  // The thunk is heap-allocated and self-deleting after execution.
-  struct ArmIoThunk : EpollOpBase {
-    EpollContext* sched;
-    EpollIoOpBase* io_op;
-    explicit ArmIoThunk(EpollContext* s, EpollIoOpBase* op)
-        : EpollOpBase{}, sched(s), io_op(op) {}
-    void Complete() noexcept override {
-      if (sched->IsStopping()) {
-        io_op->OnStopped();
-      } else {
-        sched->ArmIo(io_op);
-      }
-      delete this;
-    }
-  };
-  auto* thunk = new ArmIoThunk(this, op);
-  if (!Enqueue(thunk)) {
-    delete thunk;
-    op->OnStopped();
-  }
-}
-
-void EpollContext::ArmIo(EpollIoOpBase* op) {
   if (op->fd < 0) {
     op->OnReady(EPOLLERR);
     return;
