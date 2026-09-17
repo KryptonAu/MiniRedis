@@ -145,13 +145,12 @@ struct TestServer {
     port = ntohs(addr.sin_port);
 
     auto io_sched = io_ctx.get_scheduler();
-    auto cmd_sched = cmd_ctx.get_scheduler();
 
     cmd_thread = std::thread([&] { cmd_ctx.Run(); });
 
-    io_thread = std::thread([&, io_sched, cmd_sched] {
+    io_thread = std::thread([&, io_sched] {
       scope.spawn(stdexec::starts_on(
-          io_sched, accept_loop(scope, io_sched, cmd_sched, server, *registry,
+          io_sched, accept_loop(scope, io_sched, cmd_ctx, server, *registry,
                                 listen_fd)));
       io_ctx.Run();
     });

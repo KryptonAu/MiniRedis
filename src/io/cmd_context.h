@@ -5,7 +5,6 @@
 #include <cstddef>
 #include <functional>
 #include <limits>
-#include <stdexec/execution.hpp>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -29,90 +28,21 @@ struct CmdOpBase {
 class CmdContext;
 
 // ===========================================================================
-// CmdScheduleSender
-// ===========================================================================
-
-template <class Rcvr>
-struct CmdScheduleOpState;
-
-class CmdScheduleSender {
- public:
-  using sender_concept = stdexec::sender_tag;
-  using completion_signatures =
-      stdexec::completion_signatures<stdexec::set_value_t(),
-                                     stdexec::set_stopped_t()>;
-
-  CmdContext* sched_ = nullptr;
-
-  template <class Rcvr>
-  auto connect(Rcvr rcvr) const noexcept -> CmdScheduleOpState<Rcvr>;
-
-  struct env;
-  auto get_env() const noexcept -> env;
-};
-
-template <class Rcvr>
-struct CmdScheduleOpState final : CmdOpBase {
-  using operation_state_concept = stdexec::operation_state_tag;
-
-  CmdContext* sched_;
-  Rcvr rcvr_;
-
-  CmdScheduleOpState(CmdContext* sched, Rcvr rcvr) noexcept
-      : CmdOpBase{}, sched_(sched), rcvr_(std::move(rcvr)) {}
-
-  CmdScheduleOpState(CmdScheduleOpState&&) = delete;
-
-  void start() & noexcept;
-
-  void Complete() noexcept override { stdexec::set_value(std::move(rcvr_)); }
-  void CompleteStopped() noexcept override {
-    stdexec::set_stopped(std::move(rcvr_));
-  }
-};
-
-template <class Rcvr>
-inline auto CmdScheduleSender::connect(Rcvr rcvr) const noexcept
-    -> CmdScheduleOpState<Rcvr> {
-  return CmdScheduleOpState<Rcvr>{sched_, std::move(rcvr)};
-}
-
-// ===========================================================================
 // CmdContext — owning single-threaded command execution context.
 // The queue is SPSC: one producer thread schedules work for the CMD thread.
+//
+// Work is submitted by enqueueing an op whose operation state derives from
+// CmdOpBase — either a purpose-built sender for a real workload (see
+// io/cmd_batch.h) or PostFunction() for a fire-and-forget callable.
 // ===========================================================================
 class CmdContext {
  public:
-  class scheduler {
-   public:
-    using scheduler_concept = stdexec::scheduler_tag;
-
-    scheduler() = default;
-    explicit scheduler(CmdContext* ctx) noexcept : ctx_(ctx) {}
-
-    auto operator==(const scheduler&) const noexcept -> bool = default;
-
-    auto schedule() const noexcept -> CmdScheduleSender {
-      return CmdScheduleSender{ctx_};
-    }
-
-    auto query(stdexec::get_forward_progress_guarantee_t) const noexcept
-        -> stdexec::forward_progress_guarantee {
-      return stdexec::forward_progress_guarantee::parallel;
-    }
-
-   private:
-    CmdContext* ctx_ = nullptr;
-  };
-
   explicit CmdContext(
       size_t queue_capacity = MiniRedisConfig{}.command_queue_capacity);
   ~CmdContext() = default;
 
   CmdContext(const CmdContext&) = delete;
   CmdContext& operator=(const CmdContext&) = delete;
-
-  scheduler get_scheduler() noexcept { return scheduler{this}; }
 
   void Run();
   void Stop();
@@ -136,6 +66,18 @@ class CmdContext {
 
   static constexpr size_t kCacheLineSize = 64;
 
+  // Number of pause-spins the consumer performs before parking (see Run()).
+  static constexpr int kSpinBeforePark = 64;
+
+  // CPU relaxation hint for the adaptive spin in Run().
+  static void CpuRelax() noexcept {
+#if defined(__x86_64__) || defined(__i386__)
+    __builtin_ia32_pause();
+#else
+    std::atomic_signal_fence(std::memory_order_seq_cst);
+#endif
+  }
+
   struct alignas(kCacheLineSize) PaddedAtomicSize {
     std::atomic<size_t> value{0};
   };
@@ -154,38 +96,6 @@ class CmdContext {
   PaddedAtomicBool stopping_;
   std::thread::id cmd_thread_id_{};
 };
-
-// ===========================================================================
-// CmdScheduleSender::env
-// ===========================================================================
-struct CmdScheduleSender::env {
-  CmdContext* sched_;
-
-  auto query(stdexec::get_completion_scheduler_t<stdexec::set_value_t>)
-      const noexcept -> CmdContext::scheduler {
-    return CmdContext::scheduler{sched_};
-  }
-
-  auto query(stdexec::get_completion_scheduler_t<stdexec::set_stopped_t>)
-      const noexcept -> CmdContext::scheduler {
-    return CmdContext::scheduler{sched_};
-  }
-};
-
-inline auto CmdScheduleSender::get_env() const noexcept
-    -> CmdScheduleSender::env {
-  return CmdScheduleSender::env{sched_};
-}
-
-// ===========================================================================
-// CmdScheduleOpState::start
-// ===========================================================================
-template <class Rcvr>
-inline void CmdScheduleOpState<Rcvr>::start() & noexcept {
-  if (!sched_->Enqueue(this)) {
-    stdexec::set_stopped(std::move(rcvr_));
-  }
-}
 
 // ===========================================================================
 // Inline implementations
@@ -225,6 +135,24 @@ inline void CmdContext::Run() {
       consumer_waiting_.value.store(false, std::memory_order_release);
       break;
     }
+
+    // Spin briefly before parking. The producer normally publishes the next
+    // batch within a few hundred nanoseconds, while entering atomic::wait()
+    // costs up to four sched_yield() syscalls before it blocks (see libstdc++'s
+    // __atomic_spin) — more than the wait itself is worth. The flag protocol is
+    // unchanged: a successful dequeue clears the waiting request, and a
+    // producer that exchanges first still notifies.
+    bool dequeued = false;
+    for (int spin = 0; spin < kSpinBeforePark; ++spin) {
+      CpuRelax();
+      if (auto* op = TryDequeue(); op != nullptr) {
+        consumer_waiting_.value.store(false, std::memory_order_release);
+        op->Complete();
+        dequeued = true;
+        break;
+      }
+    }
+    if (dequeued) continue;
 
     // A wakeup before wait() leaves false, so wait cannot miss it. Only this
     // consumer can set true again, after wait returns: there is no ABA here.

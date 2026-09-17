@@ -2,12 +2,27 @@
 
 #include <atomic>
 #include <cstdint>
+#include <exec/completion_behavior.hpp>
 #include <functional>
 #include <stdexec/execution.hpp>
 #include <thread>
 #include <vector>
 
 namespace miniredis {
+
+// Every operation submitted to this context is started on the IO thread (ArmIo
+// asserts it) and its completion is delivered by ProcessReadyQueue on that same
+// thread, so the operation is affine to the context that started it. Declaring
+// that lets exec::task connect the receiver directly instead of wrapping the
+// awaitable in `continues_on(get_start_scheduler(*__context_))` — the
+// type-erased any_scheduler path that otherwise shows up as a hot spot in the
+// profile.
+struct IoAffineEnv {
+  template <class Tag>
+  static constexpr auto query(exec::get_completion_behavior_t<Tag>) noexcept {
+    return exec::completion_behavior::asynchronous_affine;
+  }
+};
 
 // ---------------------------------------------------------------------------
 // EpollOpBase — non-template base for the intrusive ready queue.

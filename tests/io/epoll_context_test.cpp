@@ -10,10 +10,12 @@
 #include <exec/task.hpp>
 #include <functional>
 #include <stdexec/execution.hpp>
+#include <string>
 #include <thread>
 #include <vector>
 
 #include "context_test_util.h"
+#include "io/cmd_batch.h"
 #include "io/cmd_context.h"
 
 namespace miniredis {
@@ -235,13 +237,17 @@ TEST(EpollContextTest, ScheduleFromOtherThreadWakesEpollWait) {
   io_thread.join();
 }
 
+// Verifies that a task awaiting work submitted to the CMD context resumes back
+// on the IO thread: CmdBatchSender declares itself affine to the IO thread and
+// delivers its completion there. An empty batch is enough — the IO -> CMD -> IO
+// round trip is what this test exercises (command execution itself is covered
+// by the command tests and the TCP integration test).
 static exec::task<void> CheckCmdRoundTrip(EpollContext& io_ctx,
                                           CmdContext& cmd_ctx) {
   EXPECT_TRUE(io_ctx.IsOnThread());
-  co_await (cmd_ctx.get_scheduler().schedule() | stdexec::then([&] {
-              EXPECT_TRUE(cmd_ctx.IsOnThread());
-              EXPECT_FALSE(io_ctx.IsOnThread());
-            }));
+  CmdBatchContext empty_batch;
+  std::string reply = co_await CmdBatchSender{&cmd_ctx, &io_ctx, &empty_batch};
+  EXPECT_TRUE(reply.empty());
   EXPECT_TRUE(io_ctx.IsOnThread());
 }
 

@@ -10,6 +10,7 @@
 #include <cerrno>
 #include <cstddef>
 #include <cstdint>
+#include <exec/completion_behavior.hpp>
 #include <span>
 #include <stdexec/execution.hpp>
 #include <string>
@@ -63,6 +64,8 @@ class AsyncReadSender {
 
   template <class Rcvr>
   auto connect(Rcvr rcvr) const noexcept -> OpState<Rcvr>;
+
+  auto get_env() const noexcept -> IoAffineEnv { return {}; }
 };
 
 template <class Rcvr>
@@ -118,6 +121,8 @@ class AsyncWriteSender {
 
   template <class Rcvr>
   auto connect(Rcvr rcvr) const noexcept -> OpState<Rcvr>;
+
+  auto get_env() const noexcept -> IoAffineEnv { return {}; }
 };
 
 template <class Rcvr>
@@ -173,6 +178,8 @@ class AsyncAcceptSender {
 
   template <class Rcvr>
   auto connect(Rcvr rcvr) const noexcept -> OpState<Rcvr>;
+
+  auto get_env() const noexcept -> IoAffineEnv { return {}; }
 };
 
 template <class Rcvr>

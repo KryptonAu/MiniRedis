@@ -3,7 +3,7 @@
 #include <gtest/gtest.h>
 
 #include <atomic>
-#include <stdexec/execution.hpp>
+#include <future>
 #include <thread>
 #include <vector>
 
@@ -27,9 +27,8 @@ struct TestCmdOp : CmdOpBase {
   void CompleteStopped() noexcept override { stopped = true; }
 };
 
-TEST(CmdContextTest, ScheduleRunsOnCmdThread) {
+TEST(CmdContextTest, PostFunctionRunsOnCmdThread) {
   CmdContext ctx;
-  auto sched = ctx.get_scheduler();
 
   std::thread::id cmd_tid;
   std::thread cmd_thread([&] {
@@ -38,12 +37,15 @@ TEST(CmdContextTest, ScheduleRunsOnCmdThread) {
   });
 
   std::thread::id work_tid;
-  auto sender = stdexec::starts_on(
-      sched, stdexec::just() |
-                 stdexec::then([&] { work_tid = std::this_thread::get_id(); }));
-  stdexec::sync_wait(std::move(sender));
+  std::promise<void> done;
+  ASSERT_TRUE(ctx.PostFunction([&] {
+    work_tid = std::this_thread::get_id();
+    done.set_value();
+  }));
+  done.get_future().wait();
 
   EXPECT_EQ(work_tid, cmd_tid);
+  EXPECT_NE(work_tid, std::this_thread::get_id());
 
   ctx.Stop();
   cmd_thread.join();
@@ -51,19 +53,29 @@ TEST(CmdContextTest, ScheduleRunsOnCmdThread) {
 
 TEST(CmdContextTest, MultipleOpsExecuteInFifoOrder) {
   CmdContext ctx;
-  auto sched = ctx.get_scheduler();
 
   std::thread cmd_thread([&] { ctx.Run(); });
 
+  constexpr int kOps = 50;
   std::vector<int> order;
-  for (int i = 0; i < 50; i++) {
-    auto sender = stdexec::starts_on(
-        sched, stdexec::just() | stdexec::then([&, i] { order.push_back(i); }));
-    stdexec::sync_wait(std::move(sender));
-  }
+  order.reserve(kOps);
+  std::promise<void> done;
+  std::atomic<int> remaining{kOps};
 
-  EXPECT_EQ(order.size(), 50u);
-  for (int i = 0; i < 50; i++) {
+  // Queue every op before any of them runs, so this exercises FIFO ordering of
+  // the queue rather than 50 sequential round trips.
+  for (int i = 0; i < kOps; i++) {
+    ASSERT_TRUE(ctx.PostFunction([&, i] {
+      order.push_back(i);
+      if (remaining.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+        done.set_value();
+      }
+    }));
+  }
+  done.get_future().wait();
+
+  ASSERT_EQ(order.size(), static_cast<size_t>(kOps));
+  for (int i = 0; i < kOps; i++) {
     EXPECT_EQ(order[static_cast<size_t>(i)], i);
   }
 
@@ -259,24 +271,17 @@ TEST(CmdContextTest, StopWhileConsumerExecutesDoesNotWait) {
 
 TEST(CmdContextTest, StopWakesRunAndStopsQueuedOps) {
   CmdContext ctx;
-  auto sched = ctx.get_scheduler();
 
   std::atomic<bool> ran{false};
   std::thread cmd_thread([&] { ctx.Run(); });
 
+  // Stop() must wake the (idle) consumer so Run() can return.
   ctx.Stop();
   cmd_thread.join();
 
-  // After Stop(), new work should complete with set_stopped.
-  auto sender = stdexec::starts_on(
-      sched, stdexec::just() | stdexec::then([&] { ran = true; }));
-
-  try {
-    stdexec::sync_wait(std::move(sender));
-  } catch (...) {
-    // Expected: set_stopped may throw.
-  }
-  EXPECT_FALSE(ran);
+  // After Stop(), new work is rejected instead of being executed.
+  EXPECT_FALSE(ctx.PostFunction([&] { ran = true; }));
+  EXPECT_FALSE(ran.load());
 }
 
 TEST(CmdContextTest, StopConcurrentWithSingleProducerDoesNotLoseWakeup) {
@@ -316,13 +321,6 @@ TEST(CmdContextTest, StopConcurrentWithSingleProducerDoesNotLoseWakeup) {
           i < accepted ? 1 : 0);
     }
   }
-}
-
-TEST(CmdContextTest, SchedulerIsCopyable) {
-  CmdContext ctx;
-  CmdContext::scheduler sched = ctx.get_scheduler();
-  CmdContext::scheduler sched2(sched);
-  EXPECT_EQ(sched, sched2);
 }
 
 }  // namespace

@@ -103,7 +103,6 @@ static void WithClientSession(Run&& run, bool appendonly = false,
   EpollContext io_ctx;
   CmdContext cmd_ctx;
   auto io_sched = io_ctx.get_scheduler();
-  auto cmd_sched = cmd_ctx.get_scheduler();
 
   exec::async_scope scope;
 
@@ -112,7 +111,7 @@ static void WithClientSession(Run&& run, bool appendonly = false,
   std::thread io_thread([&] {
     scope.spawn(stdexec::starts_on(
         io_sched,
-        handle_client(io_sched, cmd_sched, server_fd, server, registry,
+        handle_client(io_sched, cmd_ctx, server_fd, server, registry,
                       std::move(propagate), std::move(apply_config))));
     io_ctx.Run();
   });

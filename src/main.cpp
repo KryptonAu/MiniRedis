@@ -180,7 +180,6 @@ int main(int argc, char* argv[]) {
   EpollContext io_ctx;
   CmdContext cmd_ctx(config.command_queue_capacity);
   auto io_sched = io_ctx.get_scheduler();
-  auto cmd_sched = cmd_ctx.get_scheduler();
 
   exec::async_scope scope;
 
@@ -237,7 +236,7 @@ int main(int argc, char* argv[]) {
   std::thread io_thread([&] {
     scope.spawn(stdexec::starts_on(
         io_sched,
-        accept_loop(scope, io_sched, cmd_sched, server, registry, listen_fd,
+        accept_loop(scope, io_sched, cmd_ctx, server, registry, listen_fd,
                     propagate_command, apply_runtime_config)));
 
     // Arm periodic timer for serverCron.

@@ -3,6 +3,7 @@
 #include <unistd.h>
 
 #include <array>
+#include <cassert>
 #include <exec/async_scope.hpp>
 #include <exec/task.hpp>
 #include <functional>
@@ -20,6 +21,7 @@
 #include "core/resp_protocol.h"
 #include "core/server.h"
 #include "io/async_io.h"
+#include "io/cmd_batch.h"
 #include "io/cmd_context.h"
 #include "io/epoll_context.h"
 
@@ -38,8 +40,8 @@ struct ScopeExit {
 // handle_client
 // ---------------------------------------------------------------------------
 inline exec::task<void> handle_client(
-    EpollContext::scheduler io_sched, CmdContext::scheduler cmd_sched,
-    int client_fd, Server& server, CommandRegistry& registry,
+    EpollContext::scheduler io_sched, CmdContext& cmd_ctx, int client_fd,
+    Server& server, CommandRegistry& registry,
     CommandContext::PropagateFn propagate = {},
     CommandContext::ApplyConfigFn apply_config = {}) {
   Client* client = server.CreateClient(client_fd);
@@ -65,6 +67,13 @@ inline exec::task<void> handle_client(
     constexpr size_t kMaxBatch = 16;
     std::array<CommandArgStorage, kMaxBatch> batch_storage;
     std::array<std::span<const std::string_view>, kMaxBatch> batch_args;
+    CmdBatchContext batch_ctx{.server = &server,
+                              .client = client,
+                              .registry = &registry,
+                              .propagate = &propagate,
+                              .apply_config = &apply_config,
+                              .args = {},
+                              .count = 0};
 
     while (true) {
       std::span<char> write_buf = query_buf.PrepareWrite();
@@ -93,41 +102,23 @@ inline exec::task<void> handle_client(
         }
 
         if (count > 0) {
-          // One sender operation for the whole batch: the CMD thread runs the
-          // loop and returns one aggregated reply blob. Composing the
-          // scheduler sender directly with `then` (rather than
-          // `starts_on(cmd_sched, just() | then(...))`) drops an extra value
-          // sender and the `schedule_from` sequencing op state.
-          std::string replies =
-              co_await (cmd_sched.schedule() | stdexec::then([&]() {
-                          std::string out;
-                          for (size_t i = 0; i < count; ++i) {
-                            // Resolved per command so a SELECT inside the
-                            // batch affects every following command.
-                            Database* db = server.GetDbFor(*client);
-                            if (db == nullptr) {
-                              out += RespReply::Error("ERR invalid DB index");
-                              continue;
-                            }
-                            CommandContext ctx{server, *client, *db};
-                            // The callbacks are owned by this coroutine frame
-                            // and only used while executing this awaited
-                            // batch. Keep a reference wrapper in
-                            // CommandContext to avoid cloning their
-                            // type-erased targets for every request.
-                            if (propagate) ctx.propagate = std::cref(propagate);
-                            if (apply_config) {
-                              ctx.apply_config = std::cref(apply_config);
-                            }
-                            out += ExecuteCommand(registry, ctx, batch_args[i]);
-                          }
-                          return out;
-                        }));
-          // `exec::task`'s sticky scheduler already resumed this coroutine on
-          // the IO thread, so touching parser/reply_buf here is safe without an
-          // extra hand-off. An explicit `co_await io_sched.schedule()` at this
-          // point only added an eventfd wakeup plus a ready-queue round trip
-          // per command (measured: ~57-68% of pipelined throughput).
+          // One sender operation for the whole batch. Its operation state is
+          // the CMD context's queue node: start() is a bare Enqueue, the CMD
+          // thread runs the batch in a single virtual call, and only the
+          // completion goes back through the framework to the IO thread.
+          batch_ctx.args =
+              std::span<const std::span<const std::string_view>>(
+                  batch_args.data(), count);
+          batch_ctx.count = count;
+          std::string replies = co_await CmdBatchSender{
+              &cmd_ctx, io_sched.GetContext(), &batch_ctx};
+          // CmdBatchSender declares itself affine to the IO thread and delivers
+          // its completion there, so this coroutine is back on the IO thread
+          // and may touch parser/reply_buf without any further hand-off. The
+          // only exception is when the IO context has already stopped, in which
+          // case the completion is delivered in place (server shutdown).
+          assert(io_sched.GetContext()->IsStopping() ||
+                 io_sched.GetContext()->IsOnThread());
           query_buf.Consume(scanned);
           for (size_t i = 0; i < count; ++i) {
             batch_storage[i].ReleaseOversizedHeap();
@@ -169,7 +160,7 @@ inline exec::task<void> handle_client(
 // ---------------------------------------------------------------------------
 inline exec::task<void> accept_loop(
     exec::async_scope& scope, EpollContext::scheduler io_sched,
-    CmdContext::scheduler cmd_sched, Server& server, CommandRegistry& registry,
+    CmdContext& cmd_ctx, Server& server, CommandRegistry& registry,
     int listen_fd, CommandContext::PropagateFn propagate = {},
     CommandContext::ApplyConfigFn apply_config = {}) {
   while (true) {
@@ -177,7 +168,7 @@ inline exec::task<void> accept_loop(
       int client_fd =
           co_await AsyncAcceptSender{io_sched.GetContext(), listen_fd};
       scope.spawn(stdexec::starts_on(
-          io_sched, handle_client(io_sched, cmd_sched, client_fd, server,
+          io_sched, handle_client(io_sched, cmd_ctx, client_fd, server,
                                   registry, propagate, apply_config)));
     } catch (const std::exception&) {
       co_return;
